@@ -22,6 +22,8 @@ from room_dataset import RoomDataset
 import ace_vis_util as vutil
 from ace_visualizer import ACEVisualizer
 
+from scipy.spatial.transform import Rotation
+
 _logger = logging.getLogger(__name__)
 
 
@@ -259,8 +261,11 @@ if __name__ == '__main__':
                 out_R = out_pose[0:3, 0:3].numpy()
 
                 r_err = np.matmul(out_R, np.transpose(gt_R))
+
                 # Compute angle-axis representation.
-                r_err = cv2.Rodrigues(r_err)[0]
+                # r_err = cv2.Rodrigues(r_err)[0]
+                r_err = Rotation.from_matrix(r_err).as_rotvec()
+
                 # Extract the angle.
                 r_err = np.linalg.norm(r_err) * 180 / math.pi
 
@@ -293,9 +298,12 @@ if __name__ == '__main__':
 
                 # Translation.
                 t = out_pose[0:3, 3]
+                R = out_pose[0:3, 0:3].numpy()
 
                 # Rotation to axis angle.
-                rot, _ = cv2.Rodrigues(out_pose[0:3, 0:3].numpy())
+                # rot, _ = cv2.Rodrigues(R)
+
+                rot = Rotation.from_matrix(R).as_rotvec()
                 angle = np.linalg.norm(rot)
                 axis = rot / angle
 
