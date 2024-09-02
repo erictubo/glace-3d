@@ -185,7 +185,7 @@ class TrainerACE:
 
          # Load checkpoint if it exists
         if os.path.isfile(self.options.checkpoint_path):
-            self.load_checkpoint(self.options.checkpoint_path)
+            self.load_checkpoint()
             _logger.info(f"Resuming training from checkpoint: {self.options.checkpoint_path}")
         else:
             _logger.info("No checkpoint found. Starting training from scratch.")
@@ -219,10 +219,6 @@ class TrainerACE:
             self.run_epoch()
             self.training_time += time.time() - epoch_start_time
             self.epoch+=1
-
-            # Save checkpoint periodically
-            if self.iteration % self.options.checkpoint_interval == 0:
-                self.save_checkpoint(self.options.checkpoint_path)
 
         # Save trained model if main process.
         if dist.get_rank() == 0:
@@ -442,6 +438,10 @@ class TrainerACE:
             self.iteration += 1
             if self.iteration >= self.options.max_iterations:
                 break
+
+            # Save checkpoint periodically
+            if self.iteration % self.options.checkpoint_interval == 0:
+                self.save_checkpoint()
 
     def training_step(self, features_bC, target_px_b2, gt_inv_poses_b34, Ks_b33, invKs_b33):
         """

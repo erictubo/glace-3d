@@ -28,10 +28,10 @@ if __name__ == '__main__':
     parser.add_argument('output_map_file', type=Path,
                         help='target file for the trained network')
     
-    parser.add_argument('checkpoint_path', type=Path,
+    parser.add_argument('--checkpoint_path', type=Path,
                         help='target file to save checkpoints')
     
-    parser.add_argument('checkpoint_interval', type=int,
+    parser.add_argument('--checkpoint_interval', type=int,
                         help='interval to save checkpoints')
     
     parser.add_argument('--global_feat', type=_strtobool, default=True,
