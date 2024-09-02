@@ -183,6 +183,16 @@ class TrainerACE:
         Fills a feature buffer using the pretrained encoder and subsequently trains a scene coordinate regression head.
         """
 
+         # Load checkpoint if it exists
+        if os.path.isfile(self.options.checkpoint_path):
+            self.load_checkpoint(self.options.checkpoint_path)
+            _logger.info(f"Resuming training from checkpoint: {self.options.checkpoint_path}")
+        else:
+            _logger.info("No checkpoint found. Starting training from scratch.")
+            self.training_time = 0.
+            self.creating_buffer_time = 0.
+            self.epoch=0
+
         if self.ace_visualizer is not None:
 
             # Setup the ACE render pipeline.
@@ -193,33 +203,34 @@ class TrainerACE:
                 self.options.render_camera_z_offset
             )
 
-        creating_buffer_time = 0.
-        training_time = 0.
-
         self.training_start = time.time()
 
-        # Create training buffer.
-        buffer_start_time = time.time()
-        self.create_training_buffer()
-        buffer_end_time = time.time()
-        creating_buffer_time += buffer_end_time - buffer_start_time
-        _logger.info(f"Filled training buffer in {buffer_end_time - buffer_start_time:.1f}s.")
+        # Create training buffer if it doesn't exist.
+        if self.training_buffer is None:
+            buffer_start_time = time.time()
+            self.create_training_buffer()
+            buffer_end_time = time.time()
+            self.creating_buffer_time += buffer_end_time - buffer_start_time
+            _logger.info(f"Filled training buffer in {buffer_end_time - buffer_start_time:.1f}s.")
 
-        # Train the regression head.
-        self.epoch=0
+        # Train the regression head.        
         while self.iteration<self.options.max_iterations:
             epoch_start_time = time.time()
             self.run_epoch()
-            training_time += time.time() - epoch_start_time
+            self.training_time += time.time() - epoch_start_time
             self.epoch+=1
+
+            # Save checkpoint periodically
+            if self.iteration % self.options.checkpoint_interval == 0:
+                self.save_checkpoint(self.options.checkpoint_path)
 
         # Save trained model if main process.
         if dist.get_rank() == 0:
             self.save_model()
             end_time = time.time()
             _logger.info(f'Done without errors. '
-                        f'Creating buffer time: {creating_buffer_time:.1f} seconds. '
-                        f'Training time: {training_time:.1f} seconds. '
+                        f'Creating buffer time: {self.creating_buffer_time:.1f} seconds. '
+                        f'Training time: {self.training_time:.1f} seconds. '
                         f'Total time: {end_time - self.training_start:.1f} seconds.')
 
         if self.ace_visualizer is not None:
@@ -545,3 +556,40 @@ class TrainerACE:
             head_state_dict[k] = head_state_dict[k].half()
         torch.save(head_state_dict, self.options.output_map_file)
         _logger.info(f"Saved trained head weights to: {self.options.output_map_file}")
+
+    def save_checkpoint(self):
+        """Save a checkpoint of the current training state."""
+        _logger.info(f"Saving checkpoint at iteration {self.iteration}...")
+        checkpoint = {
+            'iteration': self.iteration,
+            'model_state_dict': self.regressor.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'scaler_state_dict': self.scaler.state_dict(),
+            'training_start': self.training_start,
+            'epoch': self.epoch,
+            'buffer': self.training_buffer,
+            'training_time': self.training_time,
+            'creating_buffer_time': self.creating_buffer_time,
+        }
+        torch.save(checkpoint, self.options.checkpoint_path)
+        _logger.info(f"Checkpoint saved to: {self.options.checkpoint_path}")
+
+    def load_checkpoint(self):
+        """Load a checkpoint to resume training."""
+        _logger.info(f"Loading checkpoint from: {self.options.checkpoint_path}")
+        if os.path.isfile(self.options.checkpoint_path):
+            checkpoint = torch.load(self.options.checkpoint_path, map_location=self.device)
+            self.training_buffer = checkpoint['buffer']
+            self.iteration = checkpoint['iteration']
+            self.regressor.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            self.training_start = checkpoint['training_start']
+            self.training_time = checkpoint['training_time']
+            self.creating_buffer_time = checkpoint['creating_buffer_time']
+            self.epoch = checkpoint['epoch']
+            _logger.info(f"Checkpoint loaded from: {self.options.checkpoint_path}")
+        else:
+            _logger.warning(f"No checkpoint found at: {self.options.checkpoint_path}")
