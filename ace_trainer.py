@@ -188,8 +188,8 @@ class TrainerACE:
         Fills a feature buffer using the pretrained encoder and subsequently trains a scene coordinate regression head.
         """
 
-         # Load checkpoint if it exists
-        if os.path.isfile(self.options.checkpoint_path):
+        # Load checkpoint if it exists
+        if os.path.exists(self.options.checkpoint_path):
             self.load_checkpoint()
             _logger.info(f"Resuming training from checkpoint: {self.options.checkpoint_path}")
         else:
@@ -295,29 +295,21 @@ class TrainerACE:
             _logger.info("Starting creation of the training buffer.")
         feature_dim=self.regressor.feature_dim
 
-        coords_dim = self.options.image_resolution // self.regressor.OUTPUT_SUBSAMPLE
-        print(f"coords_dim: {coords_dim}")
-
         # Create a training buffer that lives on the GPU.
         self.training_buffer = {
-            'features': torch.empty((self.options.training_buffer_size, feature_dim),
-                                    dtype=(torch.float32, torch.float16)[self.options.use_half], device=self.device),
+            'features': torch.empty((self.options.training_buffer_size, feature_dim), dtype=(torch.float32, torch.float16)[self.options.use_half], device=self.device),
 
             'target_px': torch.empty((self.options.training_buffer_size, 2), dtype=torch.float32, device=self.device),
 
-            'gt_poses_inv': torch.empty((self.options.training_buffer_size, 3, 4), dtype=torch.float32,
-                                        device=self.device),
+            'gt_poses_inv': torch.empty((self.options.training_buffer_size, 3, 4), dtype=torch.float32, device=self.device),
 
-            'intrinsics': torch.empty((self.options.training_buffer_size, 3, 3), dtype=torch.float32,
-                                      device=self.device),
+            'intrinsics': torch.empty((self.options.training_buffer_size, 3, 3), dtype=torch.float32, device=self.device),
 
-            'intrinsics_inv': torch.empty((self.options.training_buffer_size, 3, 3), dtype=torch.float32,
-                                          device=self.device),
+            'intrinsics_inv': torch.empty((self.options.training_buffer_size, 3, 3), dtype=torch.float32, device=self.device),
 
             'img_idx': torch.empty((self.options.training_buffer_size,), dtype=torch.int64, device=self.device),
 
-            'gt_scene_coords': torch.empty((self.options.training_buffer_size, 3, coords_dim, coords_dim),
-                                          dtype=torch.float32, device=self.device),
+            'gt_scene_coords': torch.empty((self.options.training_buffer_size, 3), dtype=torch.float32, device=self.device),
         }
 
         # Features are computed in evaluation mode.
@@ -374,11 +366,12 @@ class TrainerACE:
                         return tensor_in.transpose(0, 1).flatten(1).transpose(0, 1)
 
                     batch_data = {
-                        'features': normalize_shape(features_BCHW),
+                        'features': normalize_shape(features_BCHW), # shape NxC
                         'target_px': normalize_shape(pixel_positions_B2HW),
                         'gt_poses_inv': gt_pose_inv,
                         'intrinsics': intrinsics,
-                        'intrinsics_inv': intrinsics_inv
+                        'intrinsics_inv': intrinsics_inv,
+                        'gt_scene_coords': normalize_shape(gt_scene_coords_B3HW) # shape Nx3
                     }
 
                     # Turn image mask into sampling weights (all equal).
@@ -469,7 +462,7 @@ class TrainerACE:
             gt_inv_poses_b34,       # Inverse poses
             Ks_b33,                 # Intrinsics
             invKs_b33,              # Inverse intrinsics
-            gt_scene_coords_b3HW,   # Ground truth scene coordinates
+            gt_scene_coords_b3,     # Ground truth scene coordinates
             ):
         """
         Run one iteration of training, computing the reprojection error and minimising it.
@@ -492,25 +485,25 @@ class TrainerACE:
         # Back to the original shape. Convert to float32 as well.
         pred_scene_coords_b31 = pred_scene_coords_b3HW.permute(0, 2, 3, 1).flatten(0, 2).unsqueeze(-1).float()
 
-        # Make 3D points homogeneous so that we can easily matrix-multiply them.
-        pred_scene_coords_b41 = to_homogeneous(pred_scene_coords_b31)
-
-        # Scene coordinates to camera coordinates.
-        pred_cam_coords_b31 = torch.bmm(gt_inv_poses_b34, pred_scene_coords_b41)
-
-        # Project scene coordinates.
-        pred_px_b31 = torch.bmm(Ks_b33, pred_cam_coords_b31)
-        
-        #
-        # Compute masks to ignore invalid pixels
-        #
-        # Predicted coordinates behind or close to camera plane.
-        depth = pred_cam_coords_b31[:, 2] 
-        invalid_min_depth_b1 = depth < self.options.depth_min
-        # Predicted coordinates beyond max distance.
-        invalid_max_depth_b1 = depth > self.options.depth_max
-
         if self.options.mode == 0: # Use unsupervised reprojection loss.
+
+            # Make 3D points homogeneous so that we can easily matrix-multiply them.
+            pred_scene_coords_b41 = to_homogeneous(pred_scene_coords_b31)
+
+            # Scene coordinates to camera coordinates.
+            pred_cam_coords_b31 = torch.bmm(gt_inv_poses_b34, pred_scene_coords_b41)
+
+            # Project scene coordinates.
+            pred_px_b31 = torch.bmm(Ks_b33, pred_cam_coords_b31)
+            
+            #
+            # Compute masks to ignore invalid pixels
+            #
+            # Predicted coordinates behind or close to camera plane.
+            depth = pred_cam_coords_b31[:, 2] 
+            invalid_min_depth_b1 = depth < self.options.depth_min
+            # Predicted coordinates beyond max distance.
+            invalid_max_depth_b1 = depth > self.options.depth_max
 
             # Avoid division by zero.
             # Note: negative values are also clamped at +self.options.depth_min. The predicted pixel would be wrong,
@@ -554,19 +547,19 @@ class TrainerACE:
 
         elif self.options.mode == 1: # Use supervised Euclidean distance loss.
 
-            gt_scene_coords_b31 = gt_scene_coords_b3HW.permute(0, 2, 3, 1).flatten(0, 2).unsqueeze(-1).float()
-
             #
             # Compute additional scene coordinate mask used to ignore invalid pixels.
             #
             # Ground truth scene coordinates are invalid (zero).
-            invalid_coords_b1 = gt_scene_coords_b31.sum(dim=1) == 0
+            invalid_coords_b1 = gt_scene_coords_b3.sum(dim=1) == 0
 
             # Invalid mask is the union of all these. Valid mask is the opposite.
-            invalid_mask_b1 = (invalid_min_depth_b1 | invalid_coords_b1 | invalid_max_depth_b1)
-            valid_mask_b1 = ~invalid_mask_b1
+            # invalid_mask_b1 = (invalid_min_depth_b1 | invalid_coords_b1 | invalid_max_depth_b1)
+            # valid_mask_b1 = ~invalid_mask_b1
 
-            euclidean_distance_error_b1 = torch.norm(gt_scene_coords_b31 - pred_scene_coords_b31, dim=1)
+            valid_mask_b1 = ~invalid_coords_b1
+
+            euclidean_distance_error_b1 = torch.norm(gt_scene_coords_b3 - pred_scene_coords_b31.squeeze(), dim=1)
             
             # TODO: add more masks to filter prediction & GT outliers.
             # invalid_distance_b1 = euclidean_distance_error_b1 > self.options.distance_hard_clamp
@@ -577,7 +570,7 @@ class TrainerACE:
             # - e.g. scheduled loss weighting, loss thresholding, etc.
             #loss_valid = self.euclidean_loss(valid_euclidean_distance_error_b1, self.iteration)
             
-            loss_valid = valid_euclidean_distance_error_b1.mean()
+            loss_valid = valid_euclidean_distance_error_b1.sum()
 
             loss = loss_valid
             loss /= batch_size
