@@ -24,6 +24,9 @@ if __name__ == '__main__':
 
     parser.add_argument('scene', type=Path,
                         help='path to a scene in the dataset folder, e.g. "datasets/Cambridge_GreatCourt"')
+    
+    parser.add_argument('mode', type=int,
+                        help='0: Unsupervised reprojection loss, 1: Supervised Euclidean loss')
 
     parser.add_argument('output_map_file', type=Path,
                         help='target file for the trained network')

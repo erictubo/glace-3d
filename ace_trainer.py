@@ -79,7 +79,7 @@ class TrainerACE:
 
         # Create dataset.
         ds_args=dict(
-            mode=0,  # Default for ACE, we don't need scene coordinates/RGB-D.
+            mode=self.options.mode,  # Default for ACE, we don't need scene coordinates/RGB-D.
             use_half=self.options.use_half,
             image_height=self.options.image_resolution,
             augment=self.options.use_aug,
@@ -159,6 +159,11 @@ class TrainerACE:
             circle_schedule=(self.options.repro_loss_schedule == 'circle')
         )
 
+        # Setup Euclidean distance loss function.
+        # self.euclidean_loss = EuclideanDistanceLoss(
+        #     # TODO: Add parameters from new options.
+        # )
+
         # Will be filled at the beginning of the training process.
         self.training_buffer = None
 
@@ -234,7 +239,7 @@ class TrainerACE:
             # Finalize the rendering by animating the fully trained map.
             vis_dataset = CamLocDataset(
                 root_dir=self.options.scene / "train",
-                mode=0,
+                mode=self.options.mode,
                 use_half=self.options.use_half,
                 image_height=self.options.image_resolution,
                 augment=False,
@@ -289,18 +294,30 @@ class TrainerACE:
         if dist.get_rank() == 0:
             _logger.info("Starting creation of the training buffer.")
         feature_dim=self.regressor.feature_dim
+
+        coords_dim = self.options.image_resolution // self.regressor.OUTPUT_SUBSAMPLE
+        print(f"coords_dim: {coords_dim}")
+
         # Create a training buffer that lives on the GPU.
         self.training_buffer = {
             'features': torch.empty((self.options.training_buffer_size, feature_dim),
                                     dtype=(torch.float32, torch.float16)[self.options.use_half], device=self.device),
+
             'target_px': torch.empty((self.options.training_buffer_size, 2), dtype=torch.float32, device=self.device),
+
             'gt_poses_inv': torch.empty((self.options.training_buffer_size, 3, 4), dtype=torch.float32,
                                         device=self.device),
+
             'intrinsics': torch.empty((self.options.training_buffer_size, 3, 3), dtype=torch.float32,
                                       device=self.device),
+
             'intrinsics_inv': torch.empty((self.options.training_buffer_size, 3, 3), dtype=torch.float32,
                                           device=self.device),
+
             'img_idx': torch.empty((self.options.training_buffer_size,), dtype=torch.int64, device=self.device),
+
+            'gt_scene_coords': torch.empty((self.options.training_buffer_size, 3, coords_dim, coords_dim),
+                                          dtype=torch.float32, device=self.device),
         }
 
         # Features are computed in evaluation mode.
@@ -314,7 +331,7 @@ class TrainerACE:
 
             while buffer_idx < self.options.training_buffer_size:
                 dataset_passes += 1
-                for image_B1HW, image_mask_B1HW, gt_pose_B44, gt_pose_inv_B44, intrinsics_B33, intrinsics_inv_B33, _, _, _,idx in training_dataloader:
+                for image_B1HW, image_mask_B1HW, gt_pose_B44, gt_pose_inv_B44, intrinsics_B33, intrinsics_inv_B33, gt_scene_coords_B3HW, _, _,idx in training_dataloader:
 
                     # Copy to device.
                     image_B1HW = image_B1HW.to(self.device, non_blocking=True)
@@ -322,6 +339,7 @@ class TrainerACE:
                     gt_pose_inv_B44 = gt_pose_inv_B44.to(self.device, non_blocking=True)
                     intrinsics_B33 = intrinsics_B33.to(self.device, non_blocking=True)
                     intrinsics_inv_B33 = intrinsics_inv_B33.to(self.device, non_blocking=True)
+                    gt_scene_coords_B3HW = gt_scene_coords_B3HW.to(self.device, non_blocking=True)
 
                     # Compute image features.
                     with autocast(enabled=self.options.use_half):
@@ -433,7 +451,8 @@ class TrainerACE:
                 self.training_buffer['target_px'][random_batch_indices].contiguous(),
                 self.training_buffer['gt_poses_inv'][random_batch_indices].contiguous(),
                 self.training_buffer['intrinsics'][random_batch_indices].contiguous(),
-                self.training_buffer['intrinsics_inv'][random_batch_indices].contiguous()
+                self.training_buffer['intrinsics_inv'][random_batch_indices].contiguous(),
+                self.training_buffer['gt_scene_coords'][random_batch_indices].contiguous(),
             )
             self.iteration += 1
             if self.iteration >= self.options.max_iterations:
@@ -443,7 +462,15 @@ class TrainerACE:
             if self.iteration % self.options.checkpoint_interval == 0:
                 self.save_checkpoint()
 
-    def training_step(self, features_bC, target_px_b2, gt_inv_poses_b34, Ks_b33, invKs_b33):
+    def training_step(
+            self,
+            features_bC,            # Features of the batch (C is the feature dimension)
+            target_px_b2,           # Target pixel coordinates (2D)
+            gt_inv_poses_b34,       # Inverse poses
+            Ks_b33,                 # Intrinsics
+            invKs_b33,              # Inverse intrinsics
+            gt_scene_coords_b3HW,   # Ground truth scene coordinates
+            ):
         """
         Run one iteration of training, computing the reprojection error and minimising it.
         """
@@ -473,50 +500,88 @@ class TrainerACE:
 
         # Project scene coordinates.
         pred_px_b31 = torch.bmm(Ks_b33, pred_cam_coords_b31)
-
-        # Avoid division by zero.
-        # Note: negative values are also clamped at +self.options.depth_min. The predicted pixel would be wrong,
-        # but that's fine since we mask them out later.
-        pred_px_b31[:, 2].clamp_(min=self.options.depth_min)
-
-        # Dehomogenise.
-        pred_px_b21 = pred_px_b31[:, :2] / pred_px_b31[:, 2, None]
-
-        # Measure reprojection error.
-        reprojection_error_b2 = pred_px_b21.squeeze() - target_px_b2
-        reprojection_error_b1 = torch.norm(reprojection_error_b2, dim=1, keepdim=True, p=1)
-
+        
         #
-        # Compute masks used to ignore invalid pixels.
+        # Compute masks to ignore invalid pixels
         #
         # Predicted coordinates behind or close to camera plane.
         depth = pred_cam_coords_b31[:, 2] 
         invalid_min_depth_b1 = depth < self.options.depth_min
-        # Very large reprojection errors.
-        invalid_repro_b1 = reprojection_error_b1 > self.options.repro_loss_hard_clamp
         # Predicted coordinates beyond max distance.
         invalid_max_depth_b1 = depth > self.options.depth_max
 
-        # Invalid mask is the union of all these. Valid mask is the opposite.
-        invalid_mask_b1 = (invalid_min_depth_b1 | invalid_repro_b1 | invalid_max_depth_b1)
-        valid_mask_b1 = ~invalid_mask_b1
+        if self.options.mode == 0: # Use unsupervised reprojection loss.
 
-        # Reprojection error for all valid scene coordinates.
-        valid_reprojection_error_b1 = reprojection_error_b1[valid_mask_b1]
-        # Compute the loss for valid predictions.
-        loss_valid = self.repro_loss.compute(valid_reprojection_error_b1, self.iteration)
+            # Avoid division by zero.
+            # Note: negative values are also clamped at +self.options.depth_min. The predicted pixel would be wrong,
+            # but that's fine since we mask them out later.
+            pred_px_b31[:, 2].clamp_(min=self.options.depth_min)
 
-        # Handle the invalid predictions: generate proxy coordinate targets with constant depth assumption.
-        pixel_grid_crop_b31 = to_homogeneous(target_px_b2.unsqueeze(2))
-        target_camera_coords_b31 = self.options.depth_target * torch.bmm(invKs_b33, pixel_grid_crop_b31)
+            # Dehomogenise.
+            pred_px_b21 = pred_px_b31[:, :2] / pred_px_b31[:, 2, None]
 
-        # Compute the distance to target camera coordinates.
-        invalid_mask_b11 = invalid_mask_b1.unsqueeze(2)
-        loss_invalid = torch.abs(target_camera_coords_b31 - pred_cam_coords_b31).masked_select(invalid_mask_b11).sum()
+            # Measure reprojection error.
+            reprojection_error_b2 = pred_px_b21.squeeze() - target_px_b2
+            reprojection_error_b1 = torch.norm(reprojection_error_b2, dim=1, keepdim=True, p=1)
 
-        # Final loss is the sum of all 2.
-        loss = loss_valid + loss_invalid
-        loss /= batch_size
+            #
+            # Compute additional reprojection mask used to ignore invalid pixels.
+            #
+            # Very large reprojection errors.
+            invalid_repro_b1 = reprojection_error_b1 > self.options.repro_loss_hard_clamp
+
+            # Invalid mask is the union of all these. Valid mask is the opposite.
+            invalid_mask_b1 = (invalid_min_depth_b1 | invalid_repro_b1 | invalid_max_depth_b1)
+            valid_mask_b1 = ~invalid_mask_b1
+
+            # Reprojection error for all valid scene coordinates.
+            valid_reprojection_error_b1 = reprojection_error_b1[valid_mask_b1]
+            # Compute the loss for valid predictions.
+            loss_valid = self.repro_loss.compute(valid_reprojection_error_b1, self.iteration)
+
+            # Handle the invalid predictions: generate proxy coordinate targets with constant depth assumption.
+            pixel_grid_crop_b31 = to_homogeneous(target_px_b2.unsqueeze(2))
+            target_camera_coords_b31 = self.options.depth_target * torch.bmm(invKs_b33, pixel_grid_crop_b31)
+
+            # Compute the distance to target camera coordinates.
+            invalid_mask_b11 = invalid_mask_b1.unsqueeze(2)
+            loss_invalid = torch.abs(target_camera_coords_b31 - pred_cam_coords_b31).masked_select(invalid_mask_b11).sum()
+
+            # Final loss is the sum of all 2.
+            loss = loss_valid + loss_invalid
+            loss /= batch_size
+
+
+        elif self.options.mode == 1: # Use supervised Euclidean distance loss.
+
+            gt_scene_coords_b31 = gt_scene_coords_b3HW.permute(0, 2, 3, 1).flatten(0, 2).unsqueeze(-1).float()
+
+            #
+            # Compute additional scene coordinate mask used to ignore invalid pixels.
+            #
+            # Ground truth scene coordinates are invalid (zero).
+            invalid_coords_b1 = gt_scene_coords_b31.sum(dim=1) == 0
+
+            # Invalid mask is the union of all these. Valid mask is the opposite.
+            invalid_mask_b1 = (invalid_min_depth_b1 | invalid_coords_b1 | invalid_max_depth_b1)
+            valid_mask_b1 = ~invalid_mask_b1
+
+            euclidean_distance_error_b1 = torch.norm(gt_scene_coords_b31 - pred_scene_coords_b31, dim=1)
+            
+            # TODO: add more masks to filter prediction & GT outliers.
+            # invalid_distance_b1 = euclidean_distance_error_b1 > self.options.distance_hard_clamp
+
+            valid_euclidean_distance_error_b1 = euclidean_distance_error_b1[valid_mask_b1]
+            
+            # TODO: add more loss options (see DSAC* paper).
+            # - e.g. scheduled loss weighting, loss thresholding, etc.
+            #loss_valid = self.euclidean_loss(valid_euclidean_distance_error_b1, self.iteration)
+            
+            loss_valid = valid_euclidean_distance_error_b1.mean()
+
+            loss = loss_valid
+            loss /= batch_size
+
 
         # We need to check if the step actually happened, since the scaler might skip optimisation steps.
         old_optimizer_step = self.optimizer._step_count
