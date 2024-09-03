@@ -403,7 +403,13 @@ class CamLocDataset(Dataset):
             if self.sparse:
                 coords = torch.load(self.coord_files[idx])
             else:
-                depth = io.imread(self.coord_files[idx])
+                depth_file = self.coord_files[idx]
+                if str(depth_file)[-3:] == 'npy':
+                    depth = np.load(depth_file)
+                elif str(depth_file)[-3:] == 'npz':
+                    depth = np.load(depth_file)['depth']
+                else:
+                    depth = io.imread(depth_file)
                 depth = depth.astype(np.float64)
                 depth /= 1000  # from millimeters to meters
         elif self.eye:
@@ -469,7 +475,8 @@ class CamLocDataset(Dataset):
             xy[0] -= image.shape[2] / 2
             xy[1] -= image.shape[1] / 2
             # reproject
-            xy /= focal_length
+            xy[0] /= focal_length[0]
+            xy[1] /= focal_length[1]
             xy[0] *= depth
             xy[1] *= depth
 
