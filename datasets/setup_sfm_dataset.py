@@ -5,13 +5,39 @@ import math
 import os
 
 import cv2 as cv
+from scipy.spatial.transform import Rotation
 import dataset_util as dutil
 import numpy as np
 import torch
 from skimage import io
 
+# NVM_V3 File Structure, see http://ccwu.me/vsfm/doc.html#nvm
+# NVM_V3 [optional calibration]                        # file version header
+# <Model1> <Model2> ...                                # multiple reconstructed models
+# <Empty Model containing the unregistered Images>     # number of camera > 0, but number of points = 0
+# <0>                                                  # 0 camera to indicate the end of model section
+# <Some comments describing the PLY section>
+# <Number of PLY files> <List of indices of models that have associated PLY>
 
-# TODO: adapt to other SFM datasets (different file structure)
+# Each reconstructed <model> contains the following
+# <Number of cameras>   <List of cameras>
+# <Number of 3D points> <List of points>
+
+# The cameras and 3D points are saved in the following format
+# <Camera> = <File name> <focal length> <quaternion WXYZ> <camera center> <radial distortion> 0
+# <Point>  = <XYZ> <RGB> <number of measurements> <List of Measurements>
+# <Measurement> = <Image index> <Feature Index> <xy>
+
+
+# Input file structure:
+# - reconstruction.nvm: SfM reconstruction exported from COLMAP
+# - /images*: folder with images
+# - cam_sfm_poses.txt: camera poses in SfM coordinate system
+# - T_sfm_cad.txt: transformation from SfM to realistic CAD coordinate system
+
+
+# TODO: add train / test split (first N images for test if N specified, else N = 0)
+
 
 target_height = 480  # rescale images
 nn_subsampling = 8  # sub sampling of our CNN architecture, for size of the initalization targets
@@ -28,7 +54,6 @@ if __name__ == '__main__':
 
     opt = parser.parse_args()
 
-    modes = ['train', 'test']
     input_file = 'reconstruction.nvm'
 
     print("Loading SfM reconstruction...")
@@ -42,171 +67,177 @@ if __name__ == '__main__':
     num_cams = int(reconstruction[2])
     num_pts = int(reconstruction[num_cams + 4])
 
-    if opt.init == 'sfm':
+    # read points
+    pts_dict = {}
+    for cam_idx in range(0, num_cams):
+        pts_dict[cam_idx] = []
 
-        # read points
-        pts_dict = {}
-        for cam_idx in range(0, num_cams):
-            pts_dict[cam_idx] = []
+    pt = pts_start = num_cams + 5
+    pts_end = pts_start + num_pts
 
-        pt = pts_start = num_cams + 5
-        pts_end = pts_start + num_pts
+    while pt < pts_end:
 
-        while pt < pts_end:
+        pt_list = reconstruction[pt].split()
+        pt_3D = [float(x) for x in pt_list[0:3]]
+        pt_3D.append(1.0)
 
-            pt_list = reconstruction[pt].split()
-            pt_3D = [float(x) for x in pt_list[0:3]]
-            pt_3D.append(1.0)
+        for pt_view in range(0, int(pt_list[6])):
+            cam_view = int(pt_list[7 + pt_view * 4])
+            pts_dict[cam_view].append(pt_3D)
 
-            for pt_view in range(0, int(pt_list[6])):
-                cam_view = int(pt_list[7 + pt_view * 4])
-                pts_dict[cam_view].append(pt_3D)
-
-            pt += 1
+        pt += 1
 
     print("Reconstruction contains %d cameras and %d 3D points." % (num_cams, num_pts))
 
-    for mode in modes:
+    mode = 'train/'
+    dutil.mkdir(mode)
 
-        print("Converting " + mode + " data...")
+    img_output_folder = mode + 'rgb/'
+    cal_output_folder = mode + 'calibration/'
+    pose_output_folder = mode + 'poses/'
+    target_output_folder = mode + 'init/'
 
-        img_output_folder = mode + '/rgb/'
-        cal_output_folder = mode + '/calibration/'
-        pose_output_folder = mode + '/poses/'
+    dutil.mkdir(img_output_folder)
+    dutil.mkdir(cal_output_folder)
+    dutil.mkdir(pose_output_folder)
+    dutil.mkdir(target_output_folder)
 
-        dutil.mkdir(img_output_folder)
-        dutil.mkdir(cal_output_folder)
-        dutil.mkdir(pose_output_folder)
+    # T_sfm_cad = np.loadtxt('T_sfm_cad.txt')
+    # assert T_sfm_cad.shape == (4, 4)
+    # T_cad_sfm = np.linalg.inv(T_sfm_cad)
 
-        if opt.init != 'none':
-            target_output_folder = mode + '/init/'
-            dutil.mkdir(target_output_folder)
+    # T_sfm_cad = torch.tensor(T_sfm_cad).float()
+    # T_cad_sfm = torch.tensor(T_cad_sfm).float()
 
-        # get list of images for current mode (train vs. test)
-        image_list = 'dataset_' + mode + '.txt'
+    # print(f'T_sfm_cad: {T_sfm_cad}')
 
-        f = open(image_list)
-        camera_list = f.readlines()
-        f.close()
-        camera_list = camera_list[3:]
 
-        image_list = [camera.split()[0] for camera in camera_list]
+    for cam_idx in range(num_cams):
 
-        for cam_idx in range(num_cams):
+        print("Processing camera %d of %d." % (cam_idx, num_cams))
 
-            print("Processing camera %d of %d." % (cam_idx, num_cams))
-            image_file = reconstruction[3 + cam_idx].split()[0]
-            image_file = image_file[:-3] + 'png'
+        line = reconstruction[3 + cam_idx].split()
+        image_file = line[0]
+        focal_length = float(line[1])
 
-            if image_file not in image_list:
-                print("Skipping image " + image_file + ". Not part of set: " + mode + ".")
+        print(f'Image file: {image_file}')
+
+        t_sfm_cam = np.asarray([float(r) for r in line[6:9]])   # camera center in SfM coordinate system
+
+        q_cam_sfm = np.asarray([float(r) for r in line[2:6]])   # camera rotation in CAM frame
+
+        R_cam_sfm = Rotation.from_quat(q_cam_sfm, scalar_first=True).as_matrix()
+        R_sfm_cam = R_cam_sfm.T
+
+        T_sfm_cam = np.eye(4)
+        T_sfm_cam[:3, :3] = R_sfm_cam
+        T_sfm_cam[:3, 3] = t_sfm_cam
+
+        T_cam_sfm = np.linalg.inv(T_sfm_cam)
+
+
+        # POSE
+        # T_cad_cam = T_cad_sfm @ T_sfm_cam
+        # T_cad_cam = T_cad_cam.numpy()
+        # np.savetxt(pose_output_folder + image_file[:-3] + 'txt', T_cad_cam, fmt='%15.7e')
+        np.savetxt(pose_output_folder + image_file[:-3] + 'txt', T_sfm_cam, fmt='%15.7e')
+
+
+        # pose_cam_sfm = np.zeros(7)
+        # pose_cam_sfm[0:3] = T_cam_sfm[0:3, 3]
+        # pose_cam_sfm[3:7] = Rotation.from_matrix(R_cam_sfm).as_quat(scalar_first=True)
+        # print(f'pose_cam_sfm: {pose_cam_sfm}')
+
+        # pose_cad_cam = np.zeros(7)
+        # pose_cad_cam[0:3] = T_cad_cam[0:3, 3]
+        # pose_cad_cam[3:7] = Rotation.from_matrix(T_cad_cam[0:3, 0:3]).as_quat(scalar_first=True)
+        # print(f'pose_cad_cam: {pose_cad_cam}')
+        # # pose_cad_cam = pose_cad_cam.reshape(1, 7)
+        # # np.savetxt(pose_output_folder + image_file[:-3] + 'txt', pose_cad_cam)
+
+        # # rotate 180 deg around x-axis in CAM frame = reverse y and z axis of CAD frame
+        # T_cam_cad = np.linalg.inv(T_cad_cam)
+        # T_rotation = np.eye(4)
+        # T_rotation[:3, :3] = Rotation.from_euler('x', 180, degrees=True).as_matrix()
+        # T_cam_cad_blender = T_rotation @ T_cam_cad
+        # T_cad_cam_blender = np.linalg.inv(T_cam_cad_blender)
+        # pose_cad_cam_blender = np.zeros(7)
+        # pose_cad_cam_blender[0:3] = T_cad_cam_blender[0:3, 3]
+        # pose_cad_cam_blender[3:7] = Rotation.from_matrix(T_cad_cam_blender[0:3, 0:3]).as_quat(scalar_first=True)
+        # print(f'pose_cad_cam_blender: {pose_cad_cam_blender}')
+
+        
+        T_cam_sfm = torch.tensor(T_cam_sfm).float()
+        T_sfm_cam = torch.tensor(T_sfm_cam).float()
+
+
+        # IMAGE
+        image = io.imread('images/' + image_file)
+
+        img_aspect = image.shape[0] / image.shape[1]
+
+        if img_aspect > 1:
+            img_w = target_height
+            img_h = int(math.ceil(target_height * img_aspect))
+        else:
+            img_w = int(math.ceil(target_height / img_aspect))
+            img_h = target_height
+
+        out_w = int(math.ceil(img_w / nn_subsampling))
+        out_h = int(math.ceil(img_h / nn_subsampling))
+
+        out_scale = out_w / image.shape[1]
+        img_scale = img_w / image.shape[1]
+
+        image = cv.resize(image, (img_w, img_h))
+        
+        io.imsave(img_output_folder + image_file, image)
+
+        # INTRINSICS
+        with open(cal_output_folder + image_file[:-3] + 'txt', 'w') as f:
+            f.write(str(focal_length * img_scale))
+
+
+        # SCENE COORDINATES
+
+        # load 3D points from reconstruction
+        pts_3D = torch.tensor(pts_dict[cam_idx])
+
+        out_tensor = torch.zeros((3, out_h, out_w))
+        out_zbuffer = torch.zeros((out_h, out_w))
+
+        fine = 0
+        conflict = 0
+
+        for pt_idx in range(0, pts_3D.size(0)):
+
+            scene_pt = pts_3D[pt_idx]
+            scene_pt = scene_pt.unsqueeze(0)
+            scene_pt = scene_pt.transpose(0, 1)
+
+            # scene to camera coordinates
+            cam_pt = torch.mm(T_cam_sfm, scene_pt)
+            # projection to image
+            img_pt = cam_pt[0:2, 0] * focal_length / cam_pt[2, 0] * out_scale
+
+            y = img_pt[1] + out_h / 2
+            x = img_pt[0] + out_w / 2
+
+            x = int(torch.clamp(x, min=0, max=out_tensor.size(2) - 1))
+            y = int(torch.clamp(y, min=0, max=out_tensor.size(1) - 1))
+
+            if cam_pt[2, 0] > 1000:  # filter some outlier points (large depth)
                 continue
 
-            image_idx = image_list.index(image_file)
+            if out_zbuffer[y, x] == 0 or out_zbuffer[y, x] > cam_pt[2, 0]:
+                out_zbuffer[y, x] = cam_pt[2, 0]
+                out_tensor[:, y, x] = pts_3D[pt_idx, 0:3]
 
-            # read camera
-            camera = camera_list[image_idx].split()
-            cam_rot = [float(r) for r in camera[4:]]
+        # # add homogeneous coordinate
+        # out_tensor = torch.cat([out_tensor, torch.ones(1, out_h, out_w)], dim=0)
+        # # transform each 3D point to CAD frame
+        # out_tensor = torch.mm(T_cad_sfm, out_tensor.view(4, -1)).view(4, out_h, out_w)
+        # # remove homogeneous coordinate
+        # out_tensor = out_tensor[0:3, :, :]
 
-            # quaternion to axis-angle
-            angle = 2 * math.acos(cam_rot[0])
-            x = cam_rot[1] / math.sqrt(1 - cam_rot[0] ** 2)
-            y = cam_rot[2] / math.sqrt(1 - cam_rot[0] ** 2)
-            z = cam_rot[3] / math.sqrt(1 - cam_rot[0] ** 2)
-
-            cam_rot = [x * angle, y * angle, z * angle]
-
-            cam_rot = np.asarray(cam_rot)
-            cam_rot, _ = cv.Rodrigues(cam_rot)
-
-            cam_trans = [float(r) for r in camera[1:4]]
-            cam_trans = np.asarray([cam_trans])
-            cam_trans = np.transpose(cam_trans)
-            cam_trans = - np.matmul(cam_rot, cam_trans)
-
-            if np.absolute(cam_trans).max() > 10000:
-                print("Skipping image " + image_file + ". Extremely large translation. Outlier?")
-                print(cam_trans)
-                continue
-
-            cam_pose = np.concatenate((cam_rot, cam_trans), axis=1)
-            cam_pose = np.concatenate((cam_pose, [[0, 0, 0, 1]]), axis=0)
-            cam_pose = torch.tensor(cam_pose).float()
-
-            focal_length = float(reconstruction[3 + cam_idx].split()[1])
-
-            # load image
-            image = io.imread(image_file)
-            image_file = image_file.replace('/', '_')
-
-            img_aspect = image.shape[0] / image.shape[1]
-
-            if img_aspect > 1:
-                # portrait
-                img_w = target_height
-                img_h = int(math.ceil(target_height * img_aspect))
-            else:
-                # landscape
-                img_w = int(math.ceil(target_height / img_aspect))
-                img_h = target_height
-
-            out_w = int(math.ceil(img_w / nn_subsampling))
-            out_h = int(math.ceil(img_h / nn_subsampling))
-
-            out_scale = out_w / image.shape[1]
-            img_scale = img_w / image.shape[1]
-
-            image = cv.resize(image, (img_w, img_h))
-            io.imsave(img_output_folder + image_file, image)
-
-            with open(cal_output_folder + image_file[:-3] + 'txt', 'w') as f:
-                f.write(str(focal_length * img_scale))
-
-            inv_cam_pose = cam_pose.inverse()
-
-            with open(pose_output_folder + image_file[:-3] + 'txt', 'w') as f:
-                f.write(str(float(inv_cam_pose[0, 0])) + ' ' + str(float(inv_cam_pose[0, 1])) + ' ' + str(
-                    float(inv_cam_pose[0, 2])) + ' ' + str(float(inv_cam_pose[0, 3])) + '\n')
-                f.write(str(float(inv_cam_pose[1, 0])) + ' ' + str(float(inv_cam_pose[1, 1])) + ' ' + str(
-                    float(inv_cam_pose[1, 2])) + ' ' + str(float(inv_cam_pose[1, 3])) + '\n')
-                f.write(str(float(inv_cam_pose[2, 0])) + ' ' + str(float(inv_cam_pose[2, 1])) + ' ' + str(
-                    float(inv_cam_pose[2, 2])) + ' ' + str(float(inv_cam_pose[2, 3])) + '\n')
-                f.write(str(float(inv_cam_pose[3, 0])) + ' ' + str(float(inv_cam_pose[3, 1])) + ' ' + str(
-                    float(inv_cam_pose[3, 2])) + ' ' + str(float(inv_cam_pose[3, 3])) + '\n')
-
-            if opt.init == 'sfm':
-
-                # load 3D points from reconstruction
-                pts_3D = torch.tensor(pts_dict[cam_idx])
-
-                out_tensor = torch.zeros((3, out_h, out_w))
-                out_zbuffer = torch.zeros((out_h, out_w))
-
-                fine = 0
-                conflict = 0
-
-                for pt_idx in range(0, pts_3D.size(0)):
-
-                    scene_pt = pts_3D[pt_idx]
-                    scene_pt = scene_pt.unsqueeze(0)
-                    scene_pt = scene_pt.transpose(0, 1)
-
-                    # scene to camera coordinates
-                    cam_pt = torch.mm(cam_pose, scene_pt)
-                    # projection to image
-                    img_pt = cam_pt[0:2, 0] * focal_length / cam_pt[2, 0] * out_scale
-
-                    y = img_pt[1] + out_h / 2
-                    x = img_pt[0] + out_w / 2
-
-                    x = int(torch.clamp(x, min=0, max=out_tensor.size(2) - 1))
-                    y = int(torch.clamp(y, min=0, max=out_tensor.size(1) - 1))
-
-                    if cam_pt[2, 0] > 1000:  # filter some outlier points (large depth)
-                        continue
-
-                    if out_zbuffer[y, x] == 0 or out_zbuffer[y, x] > cam_pt[2, 0]:
-                        out_zbuffer[y, x] = cam_pt[2, 0]
-                        out_tensor[:, y, x] = pts_3D[pt_idx, 0:3]
-
-                torch.save(out_tensor, target_output_folder + image_file[:-4] + '.dat')
+        torch.save(out_tensor, target_output_folder + image_file[:-4] + '.dat')
