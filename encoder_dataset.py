@@ -1,0 +1,162 @@
+import logging
+import random
+from pathlib import Path
+
+import torch
+from torch.utils.data import Dataset
+from torch.utils.data.dataloader import default_collate
+from torchvision import transforms
+from torchvision.transforms import functional as TF
+from skimage import io
+from skimage import color
+from skimage.transform import rotate
+
+
+# File structure:
+# - train/
+#   - render/rgb/*
+#   - real/rgb/*
+# - test/
+#   - render/rgb/*
+#   - real/rgb/*
+
+class RealFakeDataset(Dataset):
+    def __init__(
+            self,
+            root_dir,
+            augment=False,
+            aug_rotation=15,
+            aug_scale_min=2 / 3,
+            aug_scale_max=3 / 2,
+            aug_black_white=0.1,
+            aug_color=0.3,
+            image_height=480,
+            use_half=True,
+        ):
+
+        self.use_half = use_half
+
+        self.image_height = image_height
+
+        self.augment = augment
+        self.aug_rotation = aug_rotation
+        self.aug_scale_min = aug_scale_min
+        self.aug_scale_max = aug_scale_max
+        self.aug_black_white = aug_black_white
+        self.aug_color = aug_color
+
+        root_dir = Path(root_dir)
+
+        real_rgb_dir = root_dir / 'real' / 'rgb'
+        fake_rgb_dir = root_dir / 'render' / 'rgb'
+
+        self.real_rgb_files = sorted(real_rgb_dir.iterdir())
+        self.fake_rgb_files = sorted(fake_rgb_dir.iterdir())
+
+        assert len(self.real_rgb_files) == len(self.fake_rgb_files), \
+            f'Number of real images ({len(self.real_rgb_files)}) does not match number of rendered images ({len(self.fake_rgb_files)})'
+
+
+        if self.augment:
+            self.image_transform = transforms.Compose([
+                # transforms.ToPILImage(),
+                # transforms.Resize(int(self.image_height * scale_factor)),
+                transforms.Grayscale(),
+                transforms.ColorJitter(brightness=self.aug_black_white, contrast=self.aug_black_white),
+                # saturation=self.aug_color, hue=self.aug_color),  # Disable colour augmentation.
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4],  # statistics calculated over 7scenes training set, should generalize fairly well
+                    std=[0.25]
+                ),
+            ])
+        else:
+            self.image_transform = transforms.Compose([
+                # transforms.ToPILImage(),
+                # transforms.Resize(self.image_height),
+                transforms.Grayscale(),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4],  # statistics calculated over 7scenes training set, should generalize fairly well
+                    std=[0.25]
+                ),
+            ])
+
+    def __len__(self):
+        return len(self.real_rgb_files)
+    
+    def _load_image_pair(self, idx):
+        real_image = io.imread(self.real_rgb_files[idx])
+        fake_image = io.imread(self.fake_rgb_files[idx])
+
+        if len(real_image.shape) < 3:
+            real_image = color.gray2rgb(real_image)
+
+        if len(fake_image.shape) < 3:
+            fake_image = color.gray2rgb(fake_image)
+
+        return real_image, fake_image
+    
+    @staticmethod
+    def _resize_image(image, image_height):
+        # Resize a numpy image as PIL. Works slightly better than resizing the tensor using torch's internal function.
+        image = TF.to_pil_image(image)
+        image = TF.resize(image, image_height)
+        return image
+    
+    @staticmethod
+    def _rotate_image(image, angle, order, mode='constant'):
+        # Image is a torch tensor (CxHxW), convert it to numpy as HxWxC.
+        image = image.permute(1, 2, 0).numpy()
+        # Apply rotation.
+        image = rotate(image, angle, order=order, mode=mode)
+        # Back to torch tensor.
+        image = torch.from_numpy(image).permute(2, 0, 1).float()
+        return image
+    
+    def _get_single_item(self, idx, image_height):
+        try:
+            real_image, fake_image = self._load_image_pair(idx)
+        except Exception as e:
+            logging.error(f"Error loading image pair at index {idx}: {str(e)}")
+            raise
+
+        if self.augment:
+            angle = random.uniform(-self.aug_rotation, self.aug_rotation)
+
+        real_image = self._resize_image(real_image, image_height)
+        fake_image = self._resize_image(fake_image, image_height)
+
+        real_image = self.image_transform(real_image)
+        fake_image = self.image_transform(fake_image)
+
+        if self.augment:
+            real_image = self._rotate_image(real_image, angle, 1, 'reflect')
+            fake_image = self._rotate_image(fake_image, angle, 1, 'reflect')
+        
+        if self.use_half and torch.cuda.is_available():
+            real_image = real_image.half()
+            fake_image = fake_image.half()
+        
+        assert real_image.shape == fake_image.shape, \
+            f"Shape mismatch: real {real_image.shape}, fake {fake_image.shape}"
+            
+        return real_image, fake_image
+
+    def __getitem__(self, idx):
+        if self.augment:
+            scale_factor = random.uniform(self.aug_scale_min, self.aug_scale_max)
+        else:
+            scale_factor = 1
+
+        # Target image height. We compute it here in case we are asked for a full batch of tensors because we need
+        # to apply the same scale factor to all of them.
+        image_height = int(self.image_height * scale_factor)
+
+        if isinstance(idx, list):
+            # Whole batch.
+            tensors = [self._get_single_item(i, image_height) for i in idx]
+            return default_collate(tensors)
+        else:
+            # Single element.
+            return self._get_single_item(idx, image_height)
