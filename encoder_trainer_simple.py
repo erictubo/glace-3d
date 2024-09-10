@@ -6,16 +6,31 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Adam
-from torch.cuda.amp import GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, sampler
 import torch.distributed as dist
 
 from ace_network import Encoder
 from encoder_dataset import RealFakeDataset
 
+_logger = logging.getLogger(__name__)
 
-encoder_path = "ace_encoder_pretrained.pt"
+def custom_collate(batch):
+    real_images = [item[0] for item in batch]
+    fake_images = [item[1] for item in batch]
+    
+    # Find max dimensions
+    max_height = max([img.shape[1] for img in real_images])
+    max_width = max([img.shape[2] for img in real_images])
+    
+    # Pad images
+    real_images_padded = [F.pad(img, (0, max_width - img.shape[2], 0, max_height - img.shape[1])) for img in real_images]
+    fake_images_padded = [F.pad(img, (0, max_width - img.shape[2], 0, max_height - img.shape[1])) for img in fake_images]
+    
+    return torch.stack(real_images_padded), torch.stack(fake_images_padded)
+
 
 class TrainerEncoder:
     def __init__(self, options):
@@ -23,27 +38,52 @@ class TrainerEncoder:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize encoder
-        encoder = Encoder()  # Assuming you have an Encoder class defined
+        self.encoder = Encoder()  # Assuming you have an Encoder class defined
 
-        encoder_state_dict = torch.load(encoder_path, map_location="cpu")
-        encoder.load_state_dict(encoder_state_dict)
+        encoder_state_dict = torch.load(self.options.encoder_path, map_location="cpu")
+        self.encoder.load_state_dict(encoder_state_dict)
 
-        encoder.to(self.device)
+        _logger.info(f"Loaded pretrained encoder from: {self.options.encoder_path}")
+
+        self.encoder.to(self.device)
         
         # Initialize dataset
         self.train_dataset, self.val_dataset = self._load_datasets()
 
-        self.train_loader = DataLoader(self.train_dataset, batch_size=self.options.batch_size, shuffle=True)
-        self.val_loader = DataLoader(self.val_dataset, batch_size=self.options.batch_size, shuffle=False)
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.options.batch_size,
+            shuffle=True,
+            collate_fn=custom_collate,
+        )
+
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            batch_size=self.options.batch_size,
+            shuffle=False,
+            collate_fn=custom_collate,
+        )
+        
+
+        _logger.info(f"Loaded training and validation datasets")
 
         # Initialize optimizer
         self.optimizer = Adam(
             filter(lambda p: p.requires_grad, self.encoder.parameters()),
             lr=options.learning_rate,
         )
+
+        self.scaler = GradScaler(enabled=self.options.use_half)
         
         # Initialize loss function
         self.criterion = nn.MSELoss()
+
+        self.encoder.eval()
+        val_loss = self._validate()
+        _logger.info(f'Initial Val Loss: {val_loss:.6f}')
+
+        self.iteration = 0
+        self.training_start = None
 
 
     def _load_datasets(self):
@@ -69,6 +109,10 @@ class TrainerEncoder:
         return train_dataset, val_dataset
     
     def train(self, num_epochs):
+
+        _logger.info(f"Starting training ...")
+        self.training_start = time.time()
+
         best_val_loss = float('inf')
         for epoch in range(num_epochs):
             self.encoder.train()
@@ -77,7 +121,7 @@ class TrainerEncoder:
             self.encoder.eval()
             val_loss = self._validate()
             
-            print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+            _logger.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -85,7 +129,7 @@ class TrainerEncoder:
             
             # Early stopping (optional)
             if self._early_stopping(val_loss):
-                print(f"Early stopping triggered at epoch {epoch+1}")
+                _logger.info(f"Early stopping triggered at epoch {epoch+1}")
                 break
         
     def _train_epoch(self):
@@ -93,23 +137,33 @@ class TrainerEncoder:
         for real_images, fake_images in self.train_loader:
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
-            
-            real_features = self.encoder(real_images)
-            fake_features = self.encoder(fake_images)
 
-            loss = self.criterion(real_features, fake_features)
+            with autocast(enabled=self.options.use_half):
+                real_features = self.encoder(real_images)
+                fake_features = self.encoder(fake_images)
+
+                loss = self.criterion(real_features, fake_features)
 
             self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             total_loss += loss.item()
+
+            self.iteration += 1
+
+            if self.iteration % 1 == 0:
+                # Print status.
+                time_since_start = time.time() - self.training_start
+                _logger.info(f'Iter {self.iteration:6d}, '
+                            f'Loss: {loss:.6f}, , Time: {time_since_start:.2f}s')
         
         return total_loss / len(self.train_loader)
     
     def _validate(self):
         total_loss = 0.0
-        with torch.no_grad():
+        with torch.no_grad(), autocast(enabled=self.options.use_half):
             for real_images, fake_images in self.val_loader:
                 real_images = real_images.to(self.device)
                 fake_images = fake_images.to(self.device)
@@ -135,15 +189,18 @@ class TrainerEncoder:
 class Options:
     def __init__(self):
         self.learning_rate = 0.002
-        self.data_path = "/Users/eric/Downloads/Transfer Learning"
+        self.encoder_path = "ace_encoder_pretrained.pt"
+        self.data_path = "/home/johndoe/Documents/data/Transfer Learning"
         self.use_half = True
         self.image_resolution = 480
         self.use_aug = True
         self.aug_rotation = 15
         self.aug_scale = 1.5
-        self.batch_size = 40960
+        self.batch_size = 8            # TODO: enable training with large batch size
 
 # Usage
+logging.basicConfig(level=logging.INFO)
+
 options = Options()  # Assuming you have an Options class or similar configuration
 trainer = TrainerEncoder(options)
 trainer.train(num_epochs=10)
