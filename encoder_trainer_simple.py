@@ -37,15 +37,25 @@ class TrainerEncoder:
         self.options = options
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Initialize encoder
-        self.encoder = Encoder()  # Assuming you have an Encoder class defined
-
         encoder_state_dict = torch.load(self.options.encoder_path, map_location="cpu")
+
+        # Encoder to be fine-tuned
+        self.encoder = Encoder()
         self.encoder.load_state_dict(encoder_state_dict)
+        self.encoder.to(self.device)
 
         _logger.info(f"Loaded pretrained encoder from: {self.options.encoder_path}")
 
-        self.encoder.to(self.device)
+
+        # Encoder to be used for comparison
+        self.initial_encoder = Encoder()
+        self.initial_encoder.load_state_dict(encoder_state_dict)
+        self.initial_encoder.to(self.device)
+        self.initial_encoder.eval()
+
+        for param in self.initial_encoder.parameters():
+            param.requires_grad = False
+
         
         # Initialize dataset
         self.train_dataset, self.val_dataset = self._load_datasets()
@@ -133,16 +143,31 @@ class TrainerEncoder:
                 break
         
     def _train_epoch(self):
+
         total_loss = 0.0
+
         for real_images, fake_images in self.train_loader:
+
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
+
+            with torch.no_grad():
+                real_initial_features = self.initial_encoder(real_images)
 
             with autocast(enabled=self.options.use_half):
                 real_features = self.encoder(real_images)
                 fake_features = self.encoder(fake_images)
 
-                loss = self.criterion(real_features, fake_features)
+                # Loss function for new fake encoder
+                loss_separate = self.criterion(fake_features, real_initial_features)
+                
+                # Loss function for combined encoder
+                loss_fake_real = self.criterion(fake_features, real_features)
+                loss_real_initial = self.criterion(real_features, real_initial_features)
+                w = 0.5
+                combined_loss = w * loss_fake_real + (1-w) * loss_real_initial
+
+            loss = loss_separate
 
             self.optimizer.zero_grad()
             self.scaler.scale(loss).backward()
@@ -157,7 +182,11 @@ class TrainerEncoder:
                 # Print status.
                 time_since_start = time.time() - self.training_start
                 _logger.info(f'Iter {self.iteration:6d}, '
-                            f'Loss: {loss:.6f}, , Time: {time_since_start:.2f}s')
+                 f'Separate Loss: {loss_separate:.6f}, '
+                 f'Fake-Real Loss: {loss_fake_real:.6f}, '
+                 f'Real-Initial Loss: {loss_real_initial:.6f}, '
+                #  f'Combined Loss: {loss:.6f}, '
+                 f'Time: {time_since_start:.2f}s')
         
         return total_loss / len(self.train_loader)
     
@@ -196,7 +225,7 @@ class Options:
         self.use_aug = True
         self.aug_rotation = 15
         self.aug_scale = 1.5
-        self.batch_size = 8            # TODO: enable training with large batch size
+        self.batch_size = 8
 
 # Usage
 logging.basicConfig(level=logging.INFO)
