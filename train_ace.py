@@ -30,11 +30,14 @@ if __name__ == '__main__':
     
     parser.add_argument('--mode', type=int,
                         help='0: Unsupervised reprojection loss, 1: Supervised Euclidean loss')
+
+    parser.add_argument('--sparse', type=_strtobool, default=False,
+                        help='For mode 1: load sparse init targets when True, generate from depth when False.')
     
     parser.add_argument('--checkpoint_path', type=Path,
                         help='target file to save checkpoints')
     
-    parser.add_argument('--checkpoint_interval', type=int,
+    parser.add_argument('--checkpoint_interval', type=int, default=5000,
                         help='interval to save checkpoints')
     
     parser.add_argument('--global_feat', type=_strtobool, default=True,

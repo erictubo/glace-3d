@@ -80,6 +80,7 @@ class TrainerACE:
         # Create dataset.
         ds_args=dict(
             mode=self.options.mode,  # Default for ACE, we don't need scene coordinates/RGB-D.
+            sparse=self.options.sparse,
             use_half=self.options.use_half,
             image_height=self.options.image_resolution,
             augment=self.options.use_aug,
@@ -371,8 +372,9 @@ class TrainerACE:
                         'gt_poses_inv': gt_pose_inv,
                         'intrinsics': intrinsics,
                         'intrinsics_inv': intrinsics_inv,
-                        'gt_scene_coords': normalize_shape(gt_scene_coords_B3HW) # shape Nx3
                     }
+                    if self.options.mode == 1:
+                        batch_data['gt_scene_coords'] = normalize_shape(gt_scene_coords_B3HW) # shape Nx3
 
                     # Turn image mask into sampling weights (all equal).
                     image_mask_B1HW = image_mask_B1HW.float()
@@ -448,12 +450,13 @@ class TrainerACE:
                 self.training_buffer['gt_scene_coords'][random_batch_indices].contiguous(),
             )
             self.iteration += 1
-            if self.iteration >= self.options.max_iterations:
-                break
 
             # Save checkpoint periodically
             if self.iteration % self.options.checkpoint_interval == 0:
                 self.save_checkpoint()
+            
+            if self.iteration >= self.options.max_iterations:
+                break
 
     def training_step(
             self,
