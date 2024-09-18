@@ -86,7 +86,9 @@ class TrainerEncoder:
         self.scaler = GradScaler(enabled=self.options.use_half)
         
         # Initialize loss function
-        self.criterion = nn.MSELoss()
+        self.l1_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
+        self.cosine_loss = nn.CosineEmbeddingLoss()
 
         self.encoder.eval()
         val_loss = self._validate()
@@ -135,6 +137,7 @@ class TrainerEncoder:
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                _logger.info(f"Saving best model at epoch {epoch+1}")
                 self.save_model(f"fine_tuned_encoder_e{epoch+1}.pt")
             
             # Early stopping (optional)
@@ -151,40 +154,43 @@ class TrainerEncoder:
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
 
-            with autocast(enabled=self.options.use_half):
+            with autocast(enabled=self.options.use_half), torch.no_grad():
+                real_initial_features = self.initial_encoder(real_images)
+                fake_initial_features = self.initial_encoder(fake_images)
 
-                with torch.no_grad():
-                    real_initial_features = self.initial_encoder(real_images)
-                    fake_initial_features = self.initial_encoder(fake_images)
+            with autocast(enabled=self.options.use_half):
                 real_features = self.encoder(real_images)
                 fake_features = self.encoder(fake_images)
 
                 # Loss function for new fake encoder
-                fake_vs_real_initial = self.criterion(fake_features, real_initial_features)
+                fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features)
                 
                 # Loss function for combined encoder
-                fake_vs_real = self.criterion(fake_features, real_features)
-                real_vs_real_initial = self.criterion(real_features, real_initial_features)
+                fake_vs_real = self.cosine_loss(fake_features, real_features)
+                real_vs_real_initial = self.cosine_loss(real_features, real_initial_features)
 
                 w = 0.5
                 loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
 
-                fake_vs_fake_initial = self.criterion(fake_features, fake_initial_features)
-                fake_initial_vs_real_initial = self.criterion(fake_initial_features, real_initial_features)
+                fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features)
+                fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features)
 
-            loss = loss_combined
 
-            self.optimizer.zero_grad()
+            loss = loss_combined / self.options.gradient_accumulation_steps
+
             self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-            total_loss += loss.item()
 
             self.iteration += 1
 
+            if self.iteration % self.options.gradient_accumulation_steps == 0:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+
+            total_loss += loss.item() * self.options.gradient_accumulation_steps
+
+
             if self.iteration % 1 == 0:
-                # Print status.
                 time_since_start = time.time() - self.training_start
                 _logger.info(f'Iter {self.iteration:6d}, '
                  f'F-RI: {fake_vs_real_initial:.6f}, '
@@ -194,6 +200,13 @@ class TrainerEncoder:
                  f'FI-RI: {fake_initial_vs_real_initial:.6f}, '
                  # f'Combined Loss: {loss:.6f}, '
                  f'Time: {time_since_start:.2f}s')
+            
+            if self.iteration % 100 == 0:
+                _logger.info(f'Saving model at iteration {self.iteration}')
+                self.save_model(f"fine_tuned_encoder_iter{self.iteration}.pt")
+                self.encoder.eval()
+                val_loss = self._validate()
+                _logger.info(f'Val Loss: {val_loss:.6f}')
                 
             # Fake Real Loss is very low -> maybe better to train combined feature encoder
         
@@ -209,7 +222,7 @@ class TrainerEncoder:
                 real_features = self.encoder(real_images)
                 fake_features = self.encoder(fake_images)
 
-                loss = self.criterion(real_features, fake_features)
+                loss = self.cosine_loss(real_features, fake_features)
                 total_loss += loss.item()
         
         return total_loss / len(self.val_loader)
@@ -222,24 +235,24 @@ class TrainerEncoder:
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
 
+if __name__ == "__main__":
 
-# All options:
-class Options:
-    def __init__(self):
-        self.learning_rate = 0.001
-        self.encoder_path = "ace_encoder_pretrained.pt"
-        self.data_path = "/home/johndoe/Documents/data/Transfer Learning"
-        self.use_half = True
-        self.image_resolution = 480
-        self.use_aug = True
-        self.aug_rotation = 15
-        self.aug_scale = 1.5
-        self.batch_size = 4
+    class Options:
+        def __init__(self):
+            self.learning_rate = 0.0005
+            self.encoder_path = "ace_encoder_pretrained.pt"
+            self.data_path = "/home/johndoe/Documents/data/Transfer Learning"
+            self.use_half = True
+            self.image_resolution = 480
+            self.use_aug = True
+            self.aug_rotation = 15
+            self.aug_scale = 1.5
+            self.batch_size = 4
+            self.gradient_accumulation_steps = 5
 
-# Usage
-logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO)
 
-options = Options()  # Assuming you have an Options class or similar configuration
-trainer = TrainerEncoder(options)
-trainer.train(num_epochs=10)
-trainer.save_model("fine_tuned_encoder.pt")
+    options = Options()
+    trainer = TrainerEncoder(options)
+    trainer.train(num_epochs=10)
+    trainer.save_model("fine_tuned_encoder.pt")
