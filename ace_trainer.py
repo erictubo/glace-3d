@@ -14,6 +14,7 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader,sampler,WeightedRandomSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
+
 from ace_util import get_pixel_grid, to_homogeneous
 from ace_loss import ReproLoss
 from ace_network import Regressor
@@ -135,10 +136,12 @@ class TrainerACE:
         self.optimizer = optim.AdamW(self.regressor.heads.parameters(), lr=self.options.learning_rate_min)
 
         # Setup learning rate scheduler.
-        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer,
-                                                       max_lr=self.options.learning_rate_max,
-                                                       total_steps=self.options.max_iterations,
-                                                       cycle_momentum=False)
+        self.scheduler = optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=self.options.learning_rate_max,
+            total_steps=self.options.max_iterations,
+            cycle_momentum=False
+        )
 
         # Gradient scaler in case we train with half precision.
         self.scaler = GradScaler(enabled=self.options.use_half)
@@ -230,10 +233,12 @@ class TrainerACE:
         if dist.get_rank() == 0:
             self.save_model()
             end_time = time.time()
-            _logger.info(f'Done without errors. '
-                        f'Creating buffer time: {self.creating_buffer_time:.1f} seconds. '
-                        f'Training time: {self.training_time:.1f} seconds. '
-                        f'Total time: {end_time - self.training_start:.1f} seconds.')
+            _logger.info(
+                f'Done without errors. '
+                f'Creating buffer time: {self.creating_buffer_time:.1f} seconds. '
+                f'Training time: {self.training_time:.1f} seconds. '
+                f'Total time: {end_time - self.training_start:.1f} seconds.',
+            )
 
         if self.ace_visualizer is not None:
 
@@ -280,17 +285,18 @@ class TrainerACE:
 
         # Batching is handled at the dataset level (the dataset __getitem__ receives a list of indices, because we
         # need to rescale all images in the batch to the same size).
-        training_dataloader = DataLoader(dataset=self.dataset,
-                                         sampler=batch_sampler,
-                                         batch_size=1,
-                                         drop_last=False,
-                                         worker_init_fn=seed_worker,
-                                         generator=self.loader_generator,
-                                         pin_memory=True,
-                                         num_workers=self.num_data_loader_workers,
-                                         persistent_workers=self.num_data_loader_workers > 0,
-                                         timeout=60 if self.num_data_loader_workers > 0 else 0,
-                                         )
+        training_dataloader = DataLoader(
+            dataset=self.dataset,
+            sampler=batch_sampler,
+            batch_size=1,
+            drop_last=False,
+            worker_init_fn=seed_worker,
+            generator=self.loader_generator,
+            pin_memory=True,
+            num_workers=self.num_data_loader_workers,
+            persistent_workers=self.num_data_loader_workers > 0,
+            timeout=60 if self.num_data_loader_workers > 0 else 0,
+        )
         
         if dist.get_rank() == 0:
             _logger.info("Starting creation of the training buffer.")
@@ -385,10 +391,12 @@ class TrainerACE:
                     features_to_select = min(features_to_select, self.options.training_buffer_size - buffer_idx)
 
                     # Sample indices uniformly, with replacement.
-                    sample_idxs = torch.multinomial(image_mask_N1.view(-1),
-                                                    features_to_select,
-                                                    replacement=True,
-                                                    generator=self.sampling_generator)
+                    sample_idxs = torch.multinomial(
+                        image_mask_N1.view(-1),
+                        features_to_select,
+                        replacement=True,
+                        generator=self.sampling_generator,
+                    )
 
                     # Select the data to put in the buffer.
                     for k in batch_data:
