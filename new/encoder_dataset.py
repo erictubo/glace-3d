@@ -127,21 +127,26 @@ class RealFakeDataset(Dataset):
         real_image = self._resize_image(real_image, image_height)
         fake_image = self._resize_image(fake_image, image_height)
 
+        image_mask = torch.ones((1, real_image.size[1], real_image.size[0]))
+
         real_image = self.image_transform(real_image)
         fake_image = self.image_transform(fake_image)
 
         if self.augment:
             real_image = self._rotate_image(real_image, angle, 1, 'reflect')
             fake_image = self._rotate_image(fake_image, angle, 1, 'reflect')
+            image_mask = self._rotate_image(image_mask, angle, 1, 'constant')
         
         if self.use_half and torch.cuda.is_available():
             real_image = real_image.half()
             fake_image = fake_image.half()
         
+        image_mask = image_mask > 0
+        
         assert real_image.shape == fake_image.shape, \
             f"Shape mismatch: real {real_image.shape}, fake {fake_image.shape}"
             
-        return real_image, fake_image
+        return real_image, fake_image, image_mask
 
     def __getitem__(self, idx):
         if self.augment:

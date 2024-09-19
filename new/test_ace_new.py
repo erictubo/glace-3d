@@ -29,7 +29,9 @@ class Options:
 
         self.scene = scene_path
 
-        with Path(__file__).parent as glace_path:
+        # repository path
+
+        with Path(__file__).parent.parent as glace_path:
             output_path = glace_path / 'output'
             if name.split('.')[-1] != 'pt': name = f'{name}.pt'
             if encoder_name.split('.')[-1] != 'pt': encoder_name = f'{encoder_name}.pt'
