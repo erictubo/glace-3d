@@ -158,22 +158,31 @@ class TrainerEncoder:
                 real_initial_features = self.initial_encoder(real_images)
                 fake_initial_features = self.initial_encoder(fake_images)
 
+                real_initial_features = real_initial_features.view(real_initial_features.size(0), -1)
+                fake_initial_features = fake_initial_features.view(fake_initial_features.size(0), -1)
+
             with autocast(enabled=self.options.use_half):
                 real_features = self.encoder(real_images)
                 fake_features = self.encoder(fake_images)
 
+                real_features = real_features.view(real_features.size(0), -1)
+                fake_features = fake_features.view(fake_features.size(0), -1)
+
+                # Target similarity of 1 for each dimension
+                target = torch.ones(fake_features.size(0)).to(self.device)
+
                 # Loss function for new fake encoder
-                fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features)
+                fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features, target)
                 
                 # Loss function for combined encoder
-                fake_vs_real = self.cosine_loss(fake_features, real_features)
-                real_vs_real_initial = self.cosine_loss(real_features, real_initial_features)
+                fake_vs_real = self.cosine_loss(fake_features, real_features, target)
+                real_vs_real_initial = self.cosine_loss(real_features, real_initial_features, target)
 
-                w = 0.5
+                w = 0.7
                 loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
 
-                fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features)
-                fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features)
+                fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features, target)
+                fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features, target)
 
 
             loss = loss_combined / self.options.gradient_accumulation_steps
@@ -222,7 +231,12 @@ class TrainerEncoder:
                 real_features = self.encoder(real_images)
                 fake_features = self.encoder(fake_images)
 
-                loss = self.cosine_loss(real_features, fake_features)
+                real_features = real_features.view(real_features.size(0), -1)
+                fake_features = fake_features.view(fake_features.size(0), -1)
+
+                target = torch.ones(fake_features.size(0)).to(self.device)
+
+                loss = self.cosine_loss(real_features, fake_features, target)
                 total_loss += loss.item()
         
         return total_loss / len(self.val_loader)
