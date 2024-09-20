@@ -138,7 +138,7 @@ class TrainerEncoder:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 _logger.info(f"Saving best model at epoch {epoch+1}")
-                self.save_model(f"fine_tuned_encoder_e{epoch+1}.pt")
+                self.save_model(f"output_encoder/fine_tuned_encoder_e{epoch+1}.pt")
             
             # Early stopping (optional)
             if self._early_stopping(val_loss):
@@ -212,7 +212,7 @@ class TrainerEncoder:
             
             if self.iteration % 100 == 0:
                 _logger.info(f'Saving model at iteration {self.iteration}')
-                self.save_model(f"fine_tuned_encoder_iter{self.iteration}.pt")
+                self.save_model(f"output_encoder/fine_tuned_encoder_iter{self.iteration}.pt")
                 self.encoder.eval()
                 val_loss = self._validate()
                 _logger.info(f'Val Loss: {val_loss:.6f}')
@@ -225,19 +225,31 @@ class TrainerEncoder:
         total_loss = 0.0
         with torch.no_grad(), autocast(enabled=self.options.use_half):
             for real_images, fake_images in self.val_loader:
+
                 real_images = real_images.to(self.device)
                 fake_images = fake_images.to(self.device)
-                
+                real_images = real_images.to(self.device)
+                fake_images = fake_images.to(self.device)
+
+                real_initial_features = self.initial_encoder(real_images)
+                fake_initial_features = self.initial_encoder(fake_images)
                 real_features = self.encoder(real_images)
                 fake_features = self.encoder(fake_images)
 
+                real_initial_features = real_initial_features.view(real_initial_features.size(0), -1)
+                fake_initial_features = fake_initial_features.view(fake_initial_features.size(0), -1)
                 real_features = real_features.view(real_features.size(0), -1)
                 fake_features = fake_features.view(fake_features.size(0), -1)
 
                 target = torch.ones(fake_features.size(0)).to(self.device)
 
-                loss = self.cosine_loss(real_features, fake_features, target)
-                total_loss += loss.item()
+                fake_vs_real = self.cosine_loss(fake_features, real_features, target)
+                real_vs_real_initial = self.cosine_loss(real_features, real_initial_features, target)
+
+                w = 0.7
+                loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
+
+                total_loss += loss_combined.item()
         
         return total_loss / len(self.val_loader)
 
@@ -255,7 +267,7 @@ if __name__ == "__main__":
         def __init__(self):
             self.learning_rate = 0.0005
             self.encoder_path = "ace_encoder_pretrained.pt"
-            self.data_path = "/home/johndoe/Documents/data/Transfer Learning"
+            self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
             self.use_half = True
             self.image_resolution = 480
             self.use_aug = True
@@ -269,4 +281,4 @@ if __name__ == "__main__":
     options = Options()
     trainer = TrainerEncoder(options)
     trainer.train(num_epochs=10)
-    trainer.save_model("fine_tuned_encoder.pt")
+    trainer.save_model("output_encoder/fine_tuned_encoder.pt")
