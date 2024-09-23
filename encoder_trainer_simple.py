@@ -91,8 +91,16 @@ class TrainerEncoder:
         self.cosine_loss = nn.CosineEmbeddingLoss()
 
         self.encoder.eval()
-        val_loss = self._validate()
-        _logger.info(f'Initial Val Loss: {val_loss:.6f}')
+        val_losses = self._validate()
+        _logger.info(
+            f'Initial Validation, '
+            f'Combined: {val_losses[0]:.6f}, '
+            f'F-R: {val_losses[1]:.6f}, '
+            f'R-RI: {val_losses[2]:.6f}, '
+            f'F-RI: {val_losses[3]:.6f}, '
+            f'F-FI: {val_losses[4]:.6f}, '
+            f'FI-RI: {val_losses[5]:.6f}'
+        )
 
         self.iteration = 0
         self.training_start = None
@@ -131,7 +139,8 @@ class TrainerEncoder:
             train_loss = self._train_epoch()
             
             self.encoder.eval()
-            val_loss = self._validate()
+            val_losses = self._validate()
+            val_loss = val_losses[0]
             
             _logger.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
             
@@ -154,10 +163,10 @@ class TrainerEncoder:
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
 
-            loss_combined, fake_real_loss, real_real_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
-                = self._compute_losses(real_images, fake_images, use_no_grad=False) / self.options.gradient_accumulation_steps
+            loss_combined, fake_real_loss, real_real_initial_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
+                = self._compute_losses(real_images, fake_images, use_no_grad=False)
 
-            loss = loss_combined
+            loss = loss_combined / self.options.gradient_accumulation_steps
 
             self.scaler.scale(loss).backward()
 
@@ -174,9 +183,9 @@ class TrainerEncoder:
                 time_since_start = time.time() - self.training_start
                 _logger.info(
                     f'Iter {self.iteration:6d}, '
-                    f'Loss: {loss:.6f}, '
+                    f'Combined: {loss_combined:.6f}, '
                     f'F-R: {fake_real_loss:.6f}, '
-                    f'R-R: {real_real_loss:.6f}, '
+                    f'R-RI: {real_real_initial_loss:.6f}, '
                     f'F-RI: {fake_real_initial_loss:.6f}, '
                     f'F-FI: {fake_fake_initial_loss:.6f}, '
                     f'FI-RI: {fake_initial_real_initial_loss:.6f}, '
@@ -190,9 +199,9 @@ class TrainerEncoder:
                 val_losses = self._validate()
                 _logger.info(
                     f'Validation Iter {self.iteration:6d}, '
-                    f'Loss: {val_losses[0]:.6f}, '
+                    f'Combined: {val_losses[0]:.6f}, '
                     f'F-R: {val_losses[1]:.6f}, '
-                    f'R-R: {val_losses[2]:.6f}, '
+                    f'R-RI: {val_losses[2]:.6f}, '
                     f'F-RI: {val_losses[3]:.6f}, '
                     f'F-FI: {val_losses[4]:.6f}, '
                     f'FI-RI: {val_losses[5]:.6f}'
@@ -201,9 +210,9 @@ class TrainerEncoder:
         return total_loss / len(self.train_loader)
     
     def _validate(self):
-        total_loss = 0.0
+        total_combined_loss = 0.0
         total_fake_real_loss = 0.0
-        total_real_real_loss = 0.0
+        total_real_real_initial_loss = 0.0
         total_fake_real_initial_loss = 0.0
         total_fake_fake_initial_loss = 0.0
         total_fake_initial_real_initial_loss = 0.0
@@ -214,24 +223,24 @@ class TrainerEncoder:
                 real_images = real_images.to(self.device)
                 fake_images = fake_images.to(self.device)
 
-                loss_combined, fake_real_loss, real_real_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
-                      = self._compute_loss(real_images, fake_images, use_no_grad=True)
+                loss_combined, fake_real_loss, real_real_initial_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
+                      = self._compute_losses(real_images, fake_images, use_no_grad=True)
 
                 total_combined_loss += loss_combined.item()
                 total_fake_real_loss += fake_real_loss.item()
-                total_real_real_loss += real_real_loss.item()
+                total_real_real_initial_loss += real_real_initial_loss.item()
                 total_fake_real_initial_loss += fake_real_initial_loss.item()
                 total_fake_fake_initial_loss += fake_fake_initial_loss.item()
                 total_fake_initial_real_initial_loss += fake_initial_real_initial_loss.item()
             
             total_combined_loss /= len(self.val_loader)
             total_fake_real_loss /= len(self.val_loader)
-            total_real_real_loss /= len(self.val_loader)
+            total_real_real_initial_loss /= len(self.val_loader)
             total_fake_real_initial_loss /= len(self.val_loader)
             total_fake_fake_initial_loss /= len(self.val_loader)
             total_fake_initial_real_initial_loss /= len(self.val_loader)
         
-        return total_combined_loss, total_fake_real_loss, total_real_real_loss, total_fake_real_initial_loss, total_fake_fake_initial_loss, total_fake_initial_real_initial_loss
+        return total_combined_loss, total_fake_real_loss, total_real_real_initial_loss, total_fake_real_initial_loss, total_fake_fake_initial_loss, total_fake_initial_real_initial_loss
     
     def _compute_losses(self, real_images, fake_images, use_no_grad):
 
