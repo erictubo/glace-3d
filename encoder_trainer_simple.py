@@ -211,18 +211,27 @@ class TrainerEncoder:
         with torch.no_grad(), autocast(enabled=self.options.use_half):
             for real_images, fake_images in self.val_loader:
 
+                real_images = real_images.to(self.device)
+                fake_images = fake_images.to(self.device)
+
                 loss_combined, fake_real_loss, real_real_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
                       = self._compute_loss(real_images, fake_images, use_no_grad=True)
 
-                total_loss += loss_combined.item()
+                total_combined_loss += loss_combined.item()
                 total_fake_real_loss += fake_real_loss.item()
                 total_real_real_loss += real_real_loss.item()
                 total_fake_real_initial_loss += fake_real_initial_loss.item()
                 total_fake_fake_initial_loss += fake_fake_initial_loss.item()
                 total_fake_initial_real_initial_loss += fake_initial_real_initial_loss.item()
+            
+            total_combined_loss /= len(self.val_loader)
+            total_fake_real_loss /= len(self.val_loader)
+            total_real_real_loss /= len(self.val_loader)
+            total_fake_real_initial_loss /= len(self.val_loader)
+            total_fake_fake_initial_loss /= len(self.val_loader)
+            total_fake_initial_real_initial_loss /= len(self.val_loader)
         
-        return (total_loss, total_fake_real_loss, total_real_real_loss, total_fake_real_initial_loss, total_fake_fake_initial_loss, total_fake_initial_real_initial_loss) \
-            / len(self.val_loader)
+        return total_combined_loss, total_fake_real_loss, total_real_real_loss, total_fake_real_initial_loss, total_fake_fake_initial_loss, total_fake_initial_real_initial_loss
     
     def _compute_losses(self, real_images, fake_images, use_no_grad):
 
