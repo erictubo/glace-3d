@@ -138,7 +138,7 @@ class TrainerEncoder:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 _logger.info(f"Saving best model at epoch {epoch+1}")
-                self.save_model(f"output_encoder/fine_tuned_encoder_e{epoch+1}.pt")
+                self.save_model(f"{self.options.output_path.split('.')[0]}_e{epoch+1}.pt")
             
             # Early stopping (optional)
             if self._early_stopping(val_loss):
@@ -154,38 +154,10 @@ class TrainerEncoder:
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
 
-            with autocast(enabled=self.options.use_half), torch.no_grad():
-                real_initial_features = self.initial_encoder(real_images)
-                fake_initial_features = self.initial_encoder(fake_images)
+            loss_combined, fake_real_loss, real_real_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
+                = self._compute_losses(real_images, fake_images, use_no_grad=False) / self.options.gradient_accumulation_steps
 
-                real_initial_features = real_initial_features.view(real_initial_features.size(0), -1)
-                fake_initial_features = fake_initial_features.view(fake_initial_features.size(0), -1)
-
-            with autocast(enabled=self.options.use_half):
-                real_features = self.encoder(real_images)
-                fake_features = self.encoder(fake_images)
-
-                real_features = real_features.view(real_features.size(0), -1)
-                fake_features = fake_features.view(fake_features.size(0), -1)
-
-                # Target similarity of 1 for each dimension
-                target = torch.ones(fake_features.size(0)).to(self.device)
-
-                # Loss function for new fake encoder
-                fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features, target)
-                
-                # Loss function for combined encoder
-                fake_vs_real = self.cosine_loss(fake_features, real_features, target)
-                real_vs_real_initial = self.cosine_loss(real_features, real_initial_features, target)
-
-                w = 0.7
-                loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
-
-                fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features, target)
-                fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features, target)
-
-
-            loss = loss_combined / self.options.gradient_accumulation_steps
+            loss = loss_combined
 
             self.scaler.scale(loss).backward()
 
@@ -198,46 +170,76 @@ class TrainerEncoder:
 
             total_loss += loss.item() * self.options.gradient_accumulation_steps
 
-
             if self.iteration % 1 == 0:
                 time_since_start = time.time() - self.training_start
-                _logger.info(f'Iter {self.iteration:6d}, '
-                 f'F-RI: {fake_vs_real_initial:.6f}, '
-                 f'F-R: {fake_vs_real:.6f}, '
-                 f'R-RI: {real_vs_real_initial:.6f}, '
-                 f'F-FI: {fake_vs_fake_initial:.6f}, '
-                 f'FI-RI: {fake_initial_vs_real_initial:.6f}, '
-                 # f'Combined Loss: {loss:.6f}, '
-                 f'Time: {time_since_start:.2f}s')
+                _logger.info(
+                    f'Iter {self.iteration:6d}, '
+                    f'Loss: {loss:.6f}, '
+                    f'F-R: {fake_real_loss:.6f}, '
+                    f'R-R: {real_real_loss:.6f}, '
+                    f'F-RI: {fake_real_initial_loss:.6f}, '
+                    f'F-FI: {fake_fake_initial_loss:.6f}, '
+                    f'FI-RI: {fake_initial_real_initial_loss:.6f}, '
+                    f'Time: {time_since_start:.2f}s'
+                )
             
             if self.iteration % 100 == 0:
                 _logger.info(f'Saving model at iteration {self.iteration}')
-                self.save_model(f"output_encoder/fine_tuned_encoder_iter{self.iteration}.pt")
+                self.save_model(f"{self.options.output_path.split('.')[0]}_iter{self.iteration}.pt")
                 self.encoder.eval()
-                val_loss = self._validate()
-                _logger.info(f'Val Loss: {val_loss:.6f}')
-                
-            # Fake Real Loss is very low -> maybe better to train combined feature encoder
-        
+                val_losses = self._validate()
+                _logger.info(
+                    f'Validation Iter {self.iteration:6d}, '
+                    f'Loss: {val_losses[0]:.6f}, '
+                    f'F-R: {val_losses[1]:.6f}, '
+                    f'R-R: {val_losses[2]:.6f}, '
+                    f'F-RI: {val_losses[3]:.6f}, '
+                    f'F-FI: {val_losses[4]:.6f}, '
+                    f'FI-RI: {val_losses[5]:.6f}'
+                )
+                        
         return total_loss / len(self.train_loader)
     
     def _validate(self):
         total_loss = 0.0
+        total_fake_real_loss = 0.0
+        total_real_real_loss = 0.0
+        total_fake_real_initial_loss = 0.0
+        total_fake_fake_initial_loss = 0.0
+        total_fake_initial_real_initial_loss = 0.0
+
         with torch.no_grad(), autocast(enabled=self.options.use_half):
             for real_images, fake_images in self.val_loader:
 
-                real_images = real_images.to(self.device)
-                fake_images = fake_images.to(self.device)
-                real_images = real_images.to(self.device)
-                fake_images = fake_images.to(self.device)
+                loss_combined, fake_real_loss, real_real_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
+                      = self._compute_loss(real_images, fake_images, use_no_grad=True)
 
+                total_loss += loss_combined.item()
+                total_fake_real_loss += fake_real_loss.item()
+                total_real_real_loss += real_real_loss.item()
+                total_fake_real_initial_loss += fake_real_initial_loss.item()
+                total_fake_fake_initial_loss += fake_fake_initial_loss.item()
+                total_fake_initial_real_initial_loss += fake_initial_real_initial_loss.item()
+        
+        return (total_loss, total_fake_real_loss, total_real_real_loss, total_fake_real_initial_loss, total_fake_fake_initial_loss, total_fake_initial_real_initial_loss) \
+            / len(self.val_loader)
+    
+    def _compute_losses(self, real_images, fake_images, use_no_grad):
+
+        with autocast(enabled=self.options.use_half):
+
+            with torch.no_grad():
                 real_initial_features = self.initial_encoder(real_images)
                 fake_initial_features = self.initial_encoder(fake_images)
-                real_features = self.encoder(real_images)
-                fake_features = self.encoder(fake_images)
 
                 real_initial_features = real_initial_features.view(real_initial_features.size(0), -1)
                 fake_initial_features = fake_initial_features.view(fake_initial_features.size(0), -1)
+
+            with torch.no_grad() if use_no_grad else torch.enable_grad():
+
+                real_features = self.encoder(real_images)
+                fake_features = self.encoder(fake_images)
+
                 real_features = real_features.view(real_features.size(0), -1)
                 fake_features = fake_features.view(fake_features.size(0), -1)
 
@@ -246,12 +248,14 @@ class TrainerEncoder:
                 fake_vs_real = self.cosine_loss(fake_features, real_features, target)
                 real_vs_real_initial = self.cosine_loss(real_features, real_initial_features, target)
 
-                w = 0.7
+                w = self.options.loss_weight
                 loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
 
-                total_loss += loss_combined.item()
-        
-        return total_loss / len(self.val_loader)
+                fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features, target)
+                fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features, target)
+                fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features, target)
+
+        return loss_combined, fake_vs_real, real_vs_real_initial, fake_vs_real_initial, fake_vs_fake_initial, fake_initial_vs_real_initial
 
     def _early_stopping(self, val_loss):
         # Implement early stopping logic here
@@ -265,9 +269,12 @@ if __name__ == "__main__":
 
     class Options:
         def __init__(self):
-            self.learning_rate = 0.0005
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
+            self.output_path = "output_encoder/fine_tuned_encoder.pt"
+
+            self.learning_rate = 0.0005
+            self.loss_weight = 0.7
             self.use_half = True
             self.image_resolution = 480
             self.use_aug = True
@@ -281,4 +288,4 @@ if __name__ == "__main__":
     options = Options()
     trainer = TrainerEncoder(options)
     trainer.train(num_epochs=10)
-    trainer.save_model("output_encoder/fine_tuned_encoder.pt")
+    trainer.save_model(options.output_path)
