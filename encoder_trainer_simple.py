@@ -208,7 +208,7 @@ class TrainerEncoder:
         self.scaler = GradScaler(enabled=self.options.use_half)
 
 
-        self.loss_logger = LossLogger(log_interval=self.options.gradient_accumulation_samples)
+        self.loss_logger = LossLogger(log_interval=self.options.gradient_accumulation_steps)
 
 
         self.encoder.eval()
@@ -349,13 +349,13 @@ class TrainerEncoder:
 
         return loss
     
-    def triplet_loss(anchor, positive, negative, margin=0.2):
+    # def triplet_loss(self, anchor, positive, negative, margin=0.2):
 
-        distance_positive = F.pairwise_distance(anchor, positive, p=2)
-        distance_negative = F.pairwise_distance(anchor, negative, p=2)
-        losses = F.relu(distance_positive - distance_negative + margin)
+    #     distance_positive = F.pairwise_distance(anchor, positive, p=2)
+    #     distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
+    #     losses = F.relu(distance_positive - distance_negative + margin)
 
-        return losses.mean()
+    #     return losses.mean()
     
     def contrastive_loss(self, anchor, positive, negative, mode):
 
@@ -378,65 +378,25 @@ class TrainerEncoder:
 
             anchor_vs_positive = self._cosine_loss(anchor_features, positive_features, target_value=1, margin=0.1)
 
-            positive_vs_negative = self._cosine_loss(positive_features, negative_features, target_value=-0.3, margin=0.3)
+            positive_vs_negative = self._cosine_loss(positive_features, negative_features, target_value=-1, margin=0.2)
 
             anchor_vs_anchor_initial = self._cosine_loss(anchor_features, anchor_initial_features, target_value=1, margin=0.2)
 
-            # TODO: put weights and logging interval in options / class variables / function arguments
 
-            a = 0.4
-            b = 0.2
-            c = 0.2
-            d = 0.2
+            a, b, c = self.options.contrastive_weights
 
-            triplet_loss = self.triplet_loss(anchor_features, positive_features, negative_features, margin=0.2)
+            contrastive_loss = a * anchor_vs_positive + b * positive_vs_negative + c * anchor_vs_anchor_initial
 
-            contrastive_loss = a * anchor_vs_positive + b * positive_vs_negative + c * anchor_vs_anchor_initial + d * triplet_loss
-
-
-            # logging_interval = self.gradient_accumulation_steps
-
-            # if logging:
-
-            #     if self.iteration == 0:
-            #         total_anchor_vs_positive = anchor_vs_positive
-            #         total_positive_vs_negative = positive_vs_negative
-            #         total_anchor_vs_anchor_initial = anchor_vs_anchor_initial
-            #         total_contrastive_loss = contrastive_loss
-
-            #     elif self.iteration % logging_interval != 0:
-            #         total_anchor_vs_positive += anchor_vs_positive
-            #         total_positive_vs_negative += positive_vs_negative
-            #         total_anchor_vs_anchor_initial += anchor_vs_anchor_initial
-            #         total_contrastive_loss += contrastive_loss
-
-            #     elif self.iteration % logging_interval == 0:
-                    
-            #         # Calculate mean loss over logging interval
-            #         mean_anchor_vs_positive = total_anchor_vs_positive / self.options.gradient_accumulation_steps
-            #         mean_positive_vs_negative = total_positive_vs_negative / self.options.gradient_accumulation_steps
-            #         mean_anchor_vs_anchor_initial = total_anchor_vs_anchor_initial / self.options.gradient_accumulation_steps
-            #         mean_contrastive_loss = total_contrastive_loss / self.options.gradient_accumulation_steps
-
-            #         _logger.info(
-            #             f'Iter {self.iteration:6d}, '
-            #             f'A-P:  {mean_anchor_vs_positive:.6f}, '
-            #             f'P-N:  {mean_positive_vs_negative:.6f}, '
-            #             f'A-AI: {mean_anchor_vs_anchor_initial:.6f}, '
-            #             f'Contrastive: {mean_contrastive_loss:.6f}'
-            #         )
-
-            #         # Restart logging
-            #         total_anchor_vs_positive = anchor_vs_positive
-            #         total_positive_vs_negative = positive_vs_negative
-            #         total_anchor_vs_anchor_initial = anchor_vs_anchor_initial
-            #         total_contrastive_loss = contrastive_loss
+            # triplet_loss = self.triplet_loss(anchor_features, positive_features, negative_features, margin=0.2)
+            # t = 0.3
+            # total_loss = (1-t) * contrastive_loss + t * triplet_loss
 
             loss_dict = {
                 'A-P': anchor_vs_positive.item(),
                 'P-N': positive_vs_negative.item(),
                 'A-AI': anchor_vs_anchor_initial.item(),
-                'Contrastive': contrastive_loss.item()
+                'Contrastive': contrastive_loss.item(),
+                #'Triplet': triplet_loss.item(),
             }
             
             self.loss_logger.log(loss_dict, mode)
@@ -451,40 +411,6 @@ class TrainerEncoder:
             # loss_combined += lambda_reg * l2_reg
 
         return contrastive_loss
-
-
-    # def combined_loss(self, real_images, fake_images, use_no_grad):
-
-    #     with autocast(enabled=self.options.use_half):
-
-    #         with torch.no_grad():
-    #             real_initial_features = self.initial_encoder(real_images)
-    #             fake_initial_features = self.initial_encoder(fake_images)
-
-    #         with torch.no_grad() if use_no_grad else torch.enable_grad():
-
-    #             real_features = self.encoder(real_images)
-    #             fake_features = self.encoder(fake_images)
-
-    #         fake_vs_real = self.cosine_loss(fake_features, real_features)
-    #         real_vs_real_initial = self.cosine_loss(real_features, real_initial_features)
-
-    #         fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features)
-    #         fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features)
-    #         fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features)
-
-    #         w = self.options.loss_weight
-    #         loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
-
-    #         # # Add L2 regularization
-    #         # l2_reg = torch.tensor(0., device=self.device)
-    #         # for param in self.encoder.parameters():
-    #         #     l2_reg += torch.norm(param)
-            
-    #         # lambda_reg = 0.5* 1e-3 # weight of about 0.25
-    #         # loss_combined += lambda_reg * l2_reg
-
-    #     return loss_combined
 
     def _early_stopping(self, val_loss):
         # Implement early stopping logic here
@@ -501,17 +427,18 @@ if __name__ == "__main__":
         def __init__(self):
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
-            self.output_path = "output_encoder/fine-tuned_encoder_contrastive.pt"
-
+            self.output_path = "output_encoder/fine-tuned_encoder_contrastive_new.pt"
             self.learning_rate = 0.0005
+            self.contrastive_weights = (0.4, 0.3, 0.3)
             # self.loss_weight = 0.5
+
             self.use_half = True
             self.image_resolution = 480
             self.use_aug = True
             self.aug_rotation = 15
             self.aug_scale = 1.5
             self.batch_size = 4
-            self.gradient_accumulation_samples = 10
+            self.gradient_accumulation_samples = 20
 
     logging.basicConfig(level=logging.INFO)
 
