@@ -63,19 +63,9 @@ def custom_collate_with_negatives(batch):
     real_images = [item[0] for item in batch]
     fake_images = [item[1] for item in batch]
     
-    # Create negative samples by shuffling fake images
-    negative_images = fake_images.copy()
-    random.shuffle(negative_images)
-
-    # Ensure negatives are different from positives
-    for i in range(len(fake_images)):
-        if torch.all(torch.eq(fake_images[i], negative_images[i])):
-            j = (i + 1) % len(fake_images)  # Choose the next image as negative
-            negative_images[i], negative_images[j] = negative_images[j], negative_images[i]
-    
     # Find max dimensions
-    max_height = max([img.shape[1] for img in real_images + fake_images + negative_images])
-    max_width = max([img.shape[2] for img in real_images + fake_images + negative_images])
+    max_height = max([img.shape[1] for img in real_images + fake_images])
+    max_width = max([img.shape[2] for img in real_images + fake_images])
     
     # Pad images
     def pad_images(images):
@@ -83,7 +73,17 @@ def custom_collate_with_negatives(batch):
     
     real_images_padded = pad_images(real_images)
     fake_images_padded = pad_images(fake_images)
-    negative_images_padded = pad_images(negative_images)
+
+    # Create negative samples by shuffling fake images
+    negative_images_padded = fake_images_padded.copy()
+    random.shuffle(negative_images_padded)
+
+    # Ensure negatives are different from positives
+    for i in range(len(fake_images_padded)):
+        if torch.all(torch.eq(fake_images_padded[i], negative_images_padded[i])):
+            j = (i + 1) % len(fake_images_padded)  # Choose the next image as negative
+            negative_images_padded[i], negative_images_padded[j] = negative_images_padded[j], negative_images_padded[i]
+    
     
     return (torch.stack(real_images_padded), 
             torch.stack(fake_images_padded), 
@@ -208,7 +208,7 @@ class TrainerEncoder:
         self.scaler = GradScaler(enabled=self.options.use_half)
 
 
-        self.loss_logger = LossLogger(log_interval=self.options.gradient_accumulation_steps)
+        self.loss_logger = LossLogger(log_interval=self.options.gradient_accumulation_samples)
 
 
         self.encoder.eval()
@@ -428,7 +428,7 @@ class TrainerEncoder:
                 'Contrastive': contrastive_loss.item()
             }
             
-            self.loss_logger.log(loss_dict, self.iteration, mode)
+            self.loss_logger.log(loss_dict, mode)
             
 
             # # Add L2 regularization
