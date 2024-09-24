@@ -18,6 +18,9 @@ from encoder_dataset import RealFakeDataset
 _logger = logging.getLogger(__name__)
 
 def custom_collate(batch):
+    """
+    Custom collate function to pad images to the same size.
+    """
     real_images = [item[0] for item in batch]
     fake_images = [item[1] for item in batch]
     
@@ -31,10 +34,129 @@ def custom_collate(batch):
     
     return torch.stack(real_images_padded), torch.stack(fake_images_padded)
 
+# def collate_with_negatives(batch):
+#     # Assume each item in batch is (anchor, positive)
+#     anchors, positives = zip(*batch)
+    
+#     # Create a list of all positives
+#     all_positives = list(positives)
+    
+#     # For each anchor, select a random item from all_positives as negative
+#     # Ensure it's not the same as the positive for that anchor
+#     negatives = []
+#     for i, anchor in enumerate(anchors):
+#         negative_candidates = all_positives[:i] + all_positives[i+1:]
+#         negative = random.choice(negative_candidates)
+#         negatives.append(negative)
+    
+#     # Convert to tensors
+#     anchors = torch.stack(anchors)
+#     positives = torch.stack(positives)
+#     negatives = torch.stack(negatives)
+    
+#     return anchors, positives, negatives
+
+def custom_collate_with_negatives(batch):
+    """
+    Custom collate function to pad images to the same size and include negative samples.
+    """
+    real_images = [item[0] for item in batch]
+    fake_images = [item[1] for item in batch]
+    
+    # Create negative samples by shuffling fake images
+    negative_images = fake_images.copy()
+    random.shuffle(negative_images)
+
+    # Ensure negatives are different from positives
+    for i in range(len(fake_images)):
+        if torch.all(torch.eq(fake_images[i], negative_images[i])):
+            j = (i + 1) % len(fake_images)  # Choose the next image as negative
+            negative_images[i], negative_images[j] = negative_images[j], negative_images[i]
+    
+    # Find max dimensions
+    max_height = max([img.shape[1] for img in real_images + fake_images + negative_images])
+    max_width = max([img.shape[2] for img in real_images + fake_images + negative_images])
+    
+    # Pad images
+    def pad_images(images):
+        return [F.pad(img, (0, max_width - img.shape[2], 0, max_height - img.shape[1])) for img in images]
+    
+    real_images_padded = pad_images(real_images)
+    fake_images_padded = pad_images(fake_images)
+    negative_images_padded = pad_images(negative_images)
+    
+    return (torch.stack(real_images_padded), 
+            torch.stack(fake_images_padded), 
+            torch.stack(negative_images_padded))
+
+
+# class LossLogger:
+#     def __init__(self, log_interval):
+#         self.log_interval = log_interval
+#         self.losses = {}
+
+#     def log(self, loss_dict, iteration):
+#         for key, value in loss_dict.items():
+#             if key not in self.losses:
+#                 self.losses[key] = 0
+#             self.losses[key] += value
+
+#         if iteration % self.log_interval == 0:
+#             mean_losses = {k: v / self.log_interval for k, v in self.losses.items()}
+#             log_str = f'Iter {iteration:6d}, '
+#             log_str += ', '.join([f'{k}: {v:.6f}' for k, v in mean_losses.items()])
+#             _logger.info(log_str)
+
+#             self.losses = {}
+
+
+class LossLogger:
+    def __init__(self, log_interval):
+        self.log_interval = log_interval
+        self.train_losses = {}
+        self.val_losses = {}
+        self.train_iteration = 0
+        self.val_iteration = 0
+
+    def log(self, loss_dict, mode='training'):
+        if mode == 'training':
+            losses = self.train_losses
+            self.train_iteration += 1
+            iteration = self.train_iteration
+        else:
+            losses = self.val_losses
+            self.val_iteration += 1
+            iteration = self.val_iteration
+
+        for key, value in loss_dict.items():
+            if key not in losses:
+                losses[key] = 0
+            losses[key] += value
+
+        if iteration % self.log_interval == 0:
+            mean_losses = {k: v / self.log_interval for k, v in losses.items()}
+            log_str = f'{"Train" if mode == "training" else "Val"} Iter {iteration:6d}, '
+            log_str += ', '.join([f'{k}: {v:.6f}' for k, v in mean_losses.items()])
+            _logger.info(log_str)
+            if mode == 'training':
+                self.train_losses = {}
+            else:
+                self.val_losses = {}
+
+    def reset_val(self):
+        self.val_losses = {}
+        self.val_iteration = 0
+
 
 class TrainerEncoder:
+    """
+    Trainer class for fine-tuning the encoder network.
+    """
+
     def __init__(self, options):
         self.options = options
+        self.options.gradient_accumulation_steps = options.gradient_accumulation_samples // options.batch_size
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         encoder_state_dict = torch.load(self.options.encoder_path, map_location="cpu")
@@ -47,7 +169,7 @@ class TrainerEncoder:
         _logger.info(f"Loaded pretrained encoder from: {self.options.encoder_path}")
 
 
-        # Encoder to be used for comparison
+        # Initial encoder (static) to be used for reference
         self.initial_encoder = Encoder()
         self.initial_encoder.load_state_dict(encoder_state_dict)
         self.initial_encoder.to(self.device)
@@ -64,18 +186,18 @@ class TrainerEncoder:
             self.train_dataset,
             batch_size=self.options.batch_size,
             shuffle=True,
-            collate_fn=custom_collate,
+            collate_fn=custom_collate_with_negatives,
         )
 
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=self.options.batch_size,
             shuffle=False,
-            collate_fn=custom_collate,
+            collate_fn=custom_collate_with_negatives,
         )
         
-
         _logger.info(f"Loaded training and validation datasets")
+
 
         # Initialize optimizer
         self.optimizer = Adam(
@@ -84,27 +206,21 @@ class TrainerEncoder:
         )
 
         self.scaler = GradScaler(enabled=self.options.use_half)
-        
-        # Initialize loss function
-        self.l1_loss = nn.L1Loss()
-        self.mse_loss = nn.MSELoss()
-        self.cosine_loss = nn.CosineEmbeddingLoss()
+
+
+        self.loss_logger = LossLogger(log_interval=self.options.gradient_accumulation_steps)
+
 
         self.encoder.eval()
-        val_losses = self._validate()
+        val_loss = self._validate()
+
         _logger.info(
             f'Initial Validation, '
-            f'Combined: {val_losses[0]:.6f}, '
-            f'F-R: {val_losses[1]:.6f}, '
-            f'R-RI: {val_losses[2]:.6f}, '
-            f'F-RI: {val_losses[3]:.6f}, '
-            f'F-FI: {val_losses[4]:.6f}, '
-            f'FI-RI: {val_losses[5]:.6f}'
+            f'Loss: {val_loss:.6f}'
         )
 
         self.iteration = 0
         self.training_start = None
-
 
     def _load_datasets(self):
         ds_args = dict(
@@ -139,8 +255,7 @@ class TrainerEncoder:
             train_loss = self._train_epoch()
             
             self.encoder.eval()
-            val_losses = self._validate()
-            val_loss = val_losses[0]
+            val_loss = self._validate()
             
             _logger.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
             
@@ -158,15 +273,16 @@ class TrainerEncoder:
 
         total_loss = 0.0
 
-        for real_images, fake_images in self.train_loader:
+        for real_images, fake_images, other_fake_images in self.train_loader:
 
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
+            other_fake_images = other_fake_images.to(self.device)
 
-            loss_combined, fake_real_loss, real_real_initial_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
-                = self._compute_losses(real_images, fake_images, use_no_grad=False)
+            loss_contrastive = self.contrastive_loss(real_images, fake_images, other_fake_images, mode='training')
 
-            loss = loss_combined / self.options.gradient_accumulation_steps
+
+            loss = loss_contrastive / self.options.gradient_accumulation_steps
 
             self.scaler.scale(loss).backward()
 
@@ -179,107 +295,185 @@ class TrainerEncoder:
 
             total_loss += loss.item() * self.options.gradient_accumulation_steps
 
-            if self.iteration % 1 == 0:
-                time_since_start = time.time() - self.training_start
-                _logger.info(
-                    f'Iter {self.iteration:6d}, '
-                    f'Combined: {loss_combined:.6f}, '
-                    f'F-R: {fake_real_loss:.6f}, '
-                    f'R-RI: {real_real_initial_loss:.6f}, '
-                    f'F-RI: {fake_real_initial_loss:.6f}, '
-                    f'F-FI: {fake_fake_initial_loss:.6f}, '
-                    f'FI-RI: {fake_initial_real_initial_loss:.6f}, '
-                    f'Time: {time_since_start:.2f}s'
-                )
-            
+            # if self.iteration % 1 == 0:
+            #     time_since_start = time.time() - self.training_start
+            #     _logger.info(
+            #         f'Iter {self.iteration:6d}, '
+            #         f'Loss: {loss_contrastive:.6f}, '
+            #         f'Time: {time_since_start:.2f}s'
+            #     )
+
             # if self.iteration % 100 == 0:
             #     _logger.info(f'Saving model at iteration {self.iteration}')
             #     self.save_model(f"{self.options.output_path.split('.')[0]}_iter{self.iteration}.pt")
             #     self.encoder.eval()
-            #     val_losses = self._validate()
+            #     val_los = self._validate()
             #     _logger.info(
-            #         f'Validation Iter {self.iteration:6d}, '
-            #         f'Combined: {val_losses[0]:.6f}, '
-            #         f'F-R: {val_losses[1]:.6f}, '
-            #         f'F-RI: {val_losses[3]:.6f}, '
-            #         f'R-RI: {val_losses[2]:.6f}, '
-            #         f'F-FI: {val_losses[4]:.6f}, '
-            #         f'FI-RI: {val_losses[5]:.6f}'
+            #         f'Validation Iter {self.iteration:6d},
+            #         f'Loss: {val_loss:.6f}'
             #     )
+
                         
         return total_loss / len(self.train_loader)
     
     def _validate(self):
-        total_combined_loss = 0.0
-        total_fake_real_loss = 0.0
-        total_real_real_initial_loss = 0.0
-        total_fake_real_initial_loss = 0.0
-        total_fake_fake_initial_loss = 0.0
-        total_fake_initial_real_initial_loss = 0.0
+        
+        self.loss_logger.reset_val()
+
+        total_loss = 0.0
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_images, fake_images in self.val_loader:
+            for real_images, fake_images, other_fake_images in self.val_loader:
 
                 real_images = real_images.to(self.device)
                 fake_images = fake_images.to(self.device)
+                other_fake_images = other_fake_images.to(self.device)
 
-                loss_combined, fake_real_loss, real_real_initial_loss, fake_real_initial_loss, fake_fake_initial_loss, fake_initial_real_initial_loss \
-                      = self._compute_losses(real_images, fake_images, use_no_grad=True)
+                loss = self.contrastive_loss(real_images, fake_images, other_fake_images, mode='validation')
 
-                total_combined_loss += loss_combined.item() / len(self.val_loader)
-                total_fake_real_loss += fake_real_loss.item() / len(self.val_loader)
-                total_real_real_initial_loss += real_real_initial_loss.item() / len(self.val_loader)
-                total_fake_real_initial_loss += fake_real_initial_loss.item() / len(self.val_loader)
-                total_fake_fake_initial_loss += fake_fake_initial_loss.item() / len(self.val_loader)
-                total_fake_initial_real_initial_loss += fake_initial_real_initial_loss.item() / len(self.val_loader)
-        
-        return total_combined_loss, total_fake_real_loss, total_real_real_initial_loss, total_fake_real_initial_loss, total_fake_fake_initial_loss, total_fake_initial_real_initial_loss
+                total_loss += loss.item()
+
+        return total_loss / len(self.val_loader)
     
-    def cosine_similarity(self, features_1, features_2, target=None):
+    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
 
-        features_1 = features_1.view(features_1.size(0), -1)
-        features_2 = features_2.view(features_2.size(0), -1)
+        assert features_1.shape == features_2.shape
 
-        if not target:
-            target = torch.ones(features_1.size(0)).to(self.device)
+        features_1 = F.normalize(features_1.view(features_1.size(0), -1), dim=1)
+        features_2 = F.normalize(features_2.view(features_2.size(0), -1), dim=1)
 
-            # TODO: value less than 1 or margin to account for some differences
+        target = target_value * torch.ones(features_1.size(0)).to(self.device)
 
-        return self.cosine_loss(features_1, features_2, target)
+        loss_fn = nn.CosineEmbeddingLoss(margin=margin)
+        loss = loss_fn(features_1, features_2, target)
 
+        return loss
+    
+    def contrastive_loss(self, anchor, positive, negative, mode):
 
-    def _compute_losses(self, real_images, fake_images, use_no_grad):
+        assert not torch.all(torch.eq(positive, negative)), "Negative samples are the same as positive samples"
+
+        assert mode in ['training', 'validation']
 
         with autocast(enabled=self.options.use_half):
 
             with torch.no_grad():
-                real_initial_features = self.initial_encoder(real_images)
-                fake_initial_features = self.initial_encoder(fake_images)
+                anchor_initial_features = self.initial_encoder(anchor)
+                # positive_initial_features = self.initial_encoder(positive)
+                # negative_initial_features = self.initial_encoder(negative)
 
-            with torch.no_grad() if use_no_grad else torch.enable_grad():
+            with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-                real_features = self.encoder(real_images)
-                fake_features = self.encoder(fake_images)
+                anchor_features = self.encoder(anchor)
+                positive_features = self.encoder(positive)
+                negative_features = self.encoder(negative)
 
-                fake_vs_real = self.cosine_similarity(fake_features, real_features)
-                real_vs_real_initial = self.cosine_similarity(real_features, real_initial_features)
+            anchor_vs_positive = self._cosine_loss(anchor_features, positive_features)
 
-                fake_vs_real_initial = self.cosine_similarity(fake_features, real_initial_features)
-                fake_vs_fake_initial = self.cosine_similarity(fake_features, fake_initial_features)
-                fake_initial_vs_real_initial = self.cosine_similarity(fake_initial_features, real_initial_features)
+            positive_vs_negative = self._cosine_loss(positive_features, negative_features, target_value=-1)
 
-                w = self.options.loss_weight
-                loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
+            anchor_vs_anchor_initial = self._cosine_loss(anchor_features, anchor_initial_features)
 
-                # Add L2 regularization
-                l2_reg = torch.tensor(0., device=self.device)
-                for param in self.encoder.parameters():
-                    l2_reg += torch.norm(param)
-                
-                lambda_reg = 0.5* 1e-3 # weight of about 0.25
-                loss_combined += lambda_reg * l2_reg
+            # TODO: put weights and logging interval in options / class variables / function arguments
 
-        return loss_combined, fake_vs_real, real_vs_real_initial, fake_vs_real_initial, fake_vs_fake_initial, fake_initial_vs_real_initial
+            a = 0.4
+            b = 0.3
+            c = 0.3
+
+            contrastive_loss = a * anchor_vs_positive + b * positive_vs_negative + c * anchor_vs_anchor_initial
+
+
+            # logging_interval = self.gradient_accumulation_steps
+
+            # if logging:
+
+            #     if self.iteration == 0:
+            #         total_anchor_vs_positive = anchor_vs_positive
+            #         total_positive_vs_negative = positive_vs_negative
+            #         total_anchor_vs_anchor_initial = anchor_vs_anchor_initial
+            #         total_contrastive_loss = contrastive_loss
+
+            #     elif self.iteration % logging_interval != 0:
+            #         total_anchor_vs_positive += anchor_vs_positive
+            #         total_positive_vs_negative += positive_vs_negative
+            #         total_anchor_vs_anchor_initial += anchor_vs_anchor_initial
+            #         total_contrastive_loss += contrastive_loss
+
+            #     elif self.iteration % logging_interval == 0:
+                    
+            #         # Calculate mean loss over logging interval
+            #         mean_anchor_vs_positive = total_anchor_vs_positive / self.options.gradient_accumulation_steps
+            #         mean_positive_vs_negative = total_positive_vs_negative / self.options.gradient_accumulation_steps
+            #         mean_anchor_vs_anchor_initial = total_anchor_vs_anchor_initial / self.options.gradient_accumulation_steps
+            #         mean_contrastive_loss = total_contrastive_loss / self.options.gradient_accumulation_steps
+
+            #         _logger.info(
+            #             f'Iter {self.iteration:6d}, '
+            #             f'A-P:  {mean_anchor_vs_positive:.6f}, '
+            #             f'P-N:  {mean_positive_vs_negative:.6f}, '
+            #             f'A-AI: {mean_anchor_vs_anchor_initial:.6f}, '
+            #             f'Contrastive: {mean_contrastive_loss:.6f}'
+            #         )
+
+            #         # Restart logging
+            #         total_anchor_vs_positive = anchor_vs_positive
+            #         total_positive_vs_negative = positive_vs_negative
+            #         total_anchor_vs_anchor_initial = anchor_vs_anchor_initial
+            #         total_contrastive_loss = contrastive_loss
+
+            loss_dict = {
+                'A-P': anchor_vs_positive.item(),
+                'P-N': positive_vs_negative.item(),
+                'A-AI': anchor_vs_anchor_initial.item(),
+                'Contrastive': contrastive_loss.item()
+            }
+            
+            self.loss_logger.log(loss_dict, self.iteration, mode)
+            
+
+            # # Add L2 regularization
+            # l2_reg = torch.tensor(0., device=self.device)
+            # for param in self.encoder.parameters():
+            #     l2_reg += torch.norm(param)
+            
+            # lambda_reg = 0.5* 1e-3 # weight of about 0.25
+            # loss_combined += lambda_reg * l2_reg
+
+        return contrastive_loss
+
+
+    # def combined_loss(self, real_images, fake_images, use_no_grad):
+
+    #     with autocast(enabled=self.options.use_half):
+
+    #         with torch.no_grad():
+    #             real_initial_features = self.initial_encoder(real_images)
+    #             fake_initial_features = self.initial_encoder(fake_images)
+
+    #         with torch.no_grad() if use_no_grad else torch.enable_grad():
+
+    #             real_features = self.encoder(real_images)
+    #             fake_features = self.encoder(fake_images)
+
+    #         fake_vs_real = self.cosine_loss(fake_features, real_features)
+    #         real_vs_real_initial = self.cosine_loss(real_features, real_initial_features)
+
+    #         fake_vs_real_initial = self.cosine_loss(fake_features, real_initial_features)
+    #         fake_vs_fake_initial = self.cosine_loss(fake_features, fake_initial_features)
+    #         fake_initial_vs_real_initial = self.cosine_loss(fake_initial_features, real_initial_features)
+
+    #         w = self.options.loss_weight
+    #         loss_combined = w * fake_vs_real + (1-w) * real_vs_real_initial
+
+    #         # # Add L2 regularization
+    #         # l2_reg = torch.tensor(0., device=self.device)
+    #         # for param in self.encoder.parameters():
+    #         #     l2_reg += torch.norm(param)
+            
+    #         # lambda_reg = 0.5* 1e-3 # weight of about 0.25
+    #         # loss_combined += lambda_reg * l2_reg
+
+    #     return loss_combined
 
     def _early_stopping(self, val_loss):
         # Implement early stopping logic here
@@ -289,23 +483,24 @@ class TrainerEncoder:
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
 
+
 if __name__ == "__main__":
 
     class Options:
         def __init__(self):
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
-            self.output_path = "output_encoder/fine-tuned_encoder_test.pt"
+            self.output_path = "output_encoder/fine-tuned_encoder_contrastive.pt"
 
             self.learning_rate = 0.0005
-            self.loss_weight = 0.5
+            # self.loss_weight = 0.5
             self.use_half = True
             self.image_resolution = 480
             self.use_aug = True
             self.aug_rotation = 15
             self.aug_scale = 1.5
             self.batch_size = 4
-            self.gradient_accumulation_steps = 5
+            self.gradient_accumulation_samples = 10
 
     logging.basicConfig(level=logging.INFO)
 
