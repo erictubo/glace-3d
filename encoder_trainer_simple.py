@@ -335,12 +335,12 @@ class TrainerEncoder:
 
         return total_loss / len(self.val_loader)
     
-    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
+    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.0):
 
         assert features_1.shape == features_2.shape
 
-        features_1 = F.normalize(features_1.view(features_1.size(0), -1), dim=1)
-        features_2 = F.normalize(features_2.view(features_2.size(0), -1), dim=1)
+        features_1 = F.normalize(features_1.view(features_1.size(0), -1), p=2, dim=1)
+        features_2 = F.normalize(features_2.view(features_2.size(0), -1), p=2, dim=1)
 
         target = target_value * torch.ones(features_1.size(0)).to(self.device)
 
@@ -348,6 +348,14 @@ class TrainerEncoder:
         loss = loss_fn(features_1, features_2, target)
 
         return loss
+    
+    def triplet_loss(anchor, positive, negative, margin=0.2):
+
+        distance_positive = F.pairwise_distance(anchor, positive, p=2)
+        distance_negative = F.pairwise_distance(anchor, negative, p=2)
+        losses = F.relu(distance_positive - distance_negative + margin)
+
+        return losses.mean()
     
     def contrastive_loss(self, anchor, positive, negative, mode):
 
@@ -368,19 +376,22 @@ class TrainerEncoder:
                 positive_features = self.encoder(positive)
                 negative_features = self.encoder(negative)
 
-            anchor_vs_positive = self._cosine_loss(anchor_features, positive_features)
+            anchor_vs_positive = self._cosine_loss(anchor_features, positive_features, target_value=1, margin=0.1)
 
-            positive_vs_negative = self._cosine_loss(positive_features, negative_features, target_value=-1)
+            positive_vs_negative = self._cosine_loss(positive_features, negative_features, target_value=-0.3, margin=0.3)
 
-            anchor_vs_anchor_initial = self._cosine_loss(anchor_features, anchor_initial_features)
+            anchor_vs_anchor_initial = self._cosine_loss(anchor_features, anchor_initial_features, target_value=1, margin=0.2)
 
             # TODO: put weights and logging interval in options / class variables / function arguments
 
             a = 0.4
-            b = 0.3
-            c = 0.3
+            b = 0.2
+            c = 0.2
+            d = 0.2
 
-            contrastive_loss = a * anchor_vs_positive + b * positive_vs_negative + c * anchor_vs_anchor_initial
+            triplet_loss = self.triplet_loss(anchor_features, positive_features, negative_features, margin=0.2)
+
+            contrastive_loss = a * anchor_vs_positive + b * positive_vs_negative + c * anchor_vs_anchor_initial + d * triplet_loss
 
 
             # logging_interval = self.gradient_accumulation_steps
