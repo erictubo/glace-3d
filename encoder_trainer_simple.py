@@ -335,7 +335,10 @@ class TrainerEncoder:
 
         return total_loss / len(self.val_loader)
     
-    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.0):
+    def _mse_loss(self, features_1, features_2):
+        return F.mse_loss(features_1, features_2)
+    
+    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
 
         assert features_1.shape == features_2.shape
 
@@ -349,13 +352,36 @@ class TrainerEncoder:
 
         return loss
     
-    # def triplet_loss(self, anchor, positive, negative, margin=0.2):
+    def triplet_loss(self, anchor, positive, negative, margin=0.2):
 
-    #     distance_positive = F.pairwise_distance(anchor, positive, p=2)
-    #     distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
-    #     losses = F.relu(distance_positive - distance_negative + margin)
+        distance_positive = F.pairwise_distance(anchor, positive, p=2)
+        distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
+        losses = F.relu(distance_positive - distance_negative + margin)
 
-    #     return losses.mean()
+        return losses.mean()
+
+    def _magnitude_loss(self, features, target_value=1.0):
+        # Encourage high feature magnitudes
+        return torch.abs(target_value - torch.mean(torch.norm(features, dim=1)))
+
+    # def _diversity_loss(self, features):
+    #     # Encourage diversity in feature space
+    #     features = F.normalize(features, dim=1)
+    #     similarity_matrix = torch.matmul(features, features.t())
+    #     eye = torch.eye(features.size(0), device=features.device)
+    #     return torch.mean((similarity_matrix - eye) ** 2)
+    
+    # def _spatial_consistency_loss(self, features, images):
+    #     # Encourage spatial consistency
+    #     B, C, H, W = images.shape
+    #     features = features.view(B, -1, H, W)
+        
+    #     # Compute gradients in x and y directions
+    #     grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
+    #     grad_y = features[:, :, 1:, :] - features[:, :, :-1, :]
+        
+    #     # Compute total variation
+    #     return torch.mean(torch.abs(grad_x)) + torch.mean(torch.abs(grad_y))
     
     def contrastive_loss(self, anchor, positive, negative, mode):
 
@@ -376,27 +402,58 @@ class TrainerEncoder:
                 positive_features = self.encoder(positive)
                 negative_features = self.encoder(negative)
 
-            anchor_vs_positive = self._cosine_loss(anchor_features, positive_features, target_value=1, margin=0.1)
+            # Cosine losses
+            anchor_vs_positive_cos = self._cosine_loss(anchor_features, positive_features)
+            positive_vs_negative_cos = self._cosine_loss(positive_features, negative_features, target_value=-1, margin=0.3)
+            anchor_vs_anchor_initial_cos = self._cosine_loss(anchor_features, anchor_initial_features)
 
-            positive_vs_negative = self._cosine_loss(positive_features, negative_features, target_value=-1, margin=0.2)
+            # MSE losses
+            anchor_vs_positive_mse = 100* self._mse_loss(anchor_features, positive_features)
+            positive_vs_negative_mse = 100* -self._mse_loss(positive_features, negative_features)  # Negative sign to maximize difference
+            anchor_vs_anchor_initial_mse = 100* self._mse_loss(anchor_features, anchor_initial_features)
 
-            anchor_vs_anchor_initial = self._cosine_loss(anchor_features, anchor_initial_features, target_value=1, margin=0.2)
+            # Combine losses
+            a, b, c = 0.5, 0.2, 0.3  # Weights for different components
+            w_cos, w_mse = 0.0, 1.0  # Weights for cosine and MSE losses
 
-
-            a, b, c = self.options.contrastive_weights
+            anchor_vs_positive = w_cos * anchor_vs_positive_cos + w_mse * anchor_vs_positive_mse
+            positive_vs_negative = w_cos * positive_vs_negative_cos + w_mse * positive_vs_negative_mse
+            anchor_vs_anchor_initial = w_cos * anchor_vs_anchor_initial_cos + w_mse * anchor_vs_anchor_initial_mse
 
             contrastive_loss = a * anchor_vs_positive + b * positive_vs_negative + c * anchor_vs_anchor_initial
 
+            # Triplet (MSE)
             # triplet_loss = self.triplet_loss(anchor_features, positive_features, negative_features, margin=0.2)
             # t = 0.3
             # total_loss = (1-t) * contrastive_loss + t * triplet_loss
 
+            # Magnitude
+            anchor_magnitude = self._magnitude_loss(anchor_features)
+            positive_magnitude = self._magnitude_loss(positive_features)
+            negative_magnitude = self._magnitude_loss(negative_features)
+
+            magnitudes = anchor_magnitude + positive_magnitude + negative_magnitude
+
+            contrastive_loss += magnitudes
+
+            # Diversity
+            # anchor_diversity = self._diversity_loss(anchor_features)
+            # positive_diversity = self._diversity_loss(positive_features)
+            # negative_diversity = self._diversity_loss(negative_features)
+
             loss_dict = {
-                'A-P': anchor_vs_positive.item(),
-                'P-N': positive_vs_negative.item(),
-                'A-AI': anchor_vs_anchor_initial.item(),
-                'Contrastive': contrastive_loss.item(),
+                # 'A-P cos': anchor_vs_positive_cos.item(),
+                'A-P mse': anchor_vs_positive_mse.item(),
+                # 'P-N cos': positive_vs_negative_cos.item(),
+                'P-N mse': positive_vs_negative_mse.item(),
+                # 'A-I cos': anchor_vs_anchor_initial_cos.item(),
+                'A-I mse': anchor_vs_anchor_initial_mse.item(),
+                '|A|': anchor_magnitude.item(),
+                '|P|': positive_magnitude.item(),
+                '|N|': negative_magnitude.item(),
+                # 'AD': anchor_diversity.item(),
                 #'Triplet': triplet_loss.item(),
+                'Contrastive': contrastive_loss.item(),
             }
             
             self.loss_logger.log(loss_dict, mode)
@@ -427,7 +484,7 @@ if __name__ == "__main__":
         def __init__(self):
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
-            self.output_path = "output_encoder/fine-tuned_encoder_contrastive_new.pt"
+            self.output_path = "output_encoder/fine-tuned_encoder_no_color_aug.pt"
             self.learning_rate = 0.0005
             self.contrastive_weights = (0.4, 0.3, 0.3)
             # self.loss_weight = 0.5
@@ -438,11 +495,11 @@ if __name__ == "__main__":
             self.aug_rotation = 15
             self.aug_scale = 1.5
             self.batch_size = 4
-            self.gradient_accumulation_samples = 20
+            self.gradient_accumulation_samples = 40
 
     logging.basicConfig(level=logging.INFO)
 
     options = Options()
     trainer = TrainerEncoder(options)
-    trainer.train(num_epochs=2)
+    trainer.train(num_epochs=4)
     trainer.save_model(options.output_path)
