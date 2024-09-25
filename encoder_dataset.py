@@ -25,13 +25,23 @@ class RealFakeDataset(Dataset):
             self,
             root_dir,
             augment=False,
-            aug_rotation=15,
-            aug_scale_min=2 / 3,
-            aug_scale_max=3 / 2,
-            aug_black_white=0.1,
-            aug_color=0.3,
-            image_height=480,
+            # aug_rotation=15,
+            # aug_scale_min=2 / 3,
+            # aug_scale_max=3 / 2,
+            # aug_black_white=0.1,
+            # aug_color=0.3,
+            # image_height=480,
+            # use_half=True,
+
             use_half=True,
+            image_height=480,
+            aug_rotation=40,  # Increased to 40 degrees
+            aug_scale_min=240/480,  # Minimum scale factor
+            aug_scale_max=960/480,  # Maximum scale factor
+            aug_brightness=0.4,
+            aug_contrast=0.4,
+            aug_saturation=0.3,
+            aug_hue=0.3,
         ):
 
         self.use_half = use_half
@@ -42,8 +52,13 @@ class RealFakeDataset(Dataset):
         self.aug_rotation = aug_rotation
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
-        self.aug_black_white = aug_black_white
-        self.aug_color = aug_color
+        self.aug_brightness = aug_brightness
+        self.aug_contrast = aug_contrast
+        self.aug_saturation = aug_saturation
+        self.aug_hue = aug_hue
+
+        # self.aug_black_white = aug_black_white
+        # self.aug_color = aug_color
 
         root_dir = Path(root_dir)
 
@@ -61,14 +76,14 @@ class RealFakeDataset(Dataset):
             self.image_transform = transforms.Compose([
                 # transforms.ToPILImage(),
                 # transforms.Resize(int(self.image_height * scale_factor)),
+                transforms.ColorJitter(
+                    brightness=self.aug_brightness,
+                    contrast=self.aug_contrast,
+                    saturation=self.aug_saturation,
+                    hue=self.aug_hue),
                 transforms.Grayscale(),
-                transforms.ColorJitter(brightness=self.aug_black_white, contrast=self.aug_black_white),
-                # saturation=self.aug_color, hue=self.aug_color),  # Disable colour augmentation.
                 transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4],  # statistics calculated over 7scenes training set, should generalize fairly well
-                    std=[0.25]
-                ),
+                transforms.Normalize(mean=[0.4], std=[0.25]),
             ])
         else:
             self.image_transform = transforms.Compose([
@@ -76,10 +91,7 @@ class RealFakeDataset(Dataset):
                 # transforms.Resize(self.image_height),
                 transforms.Grayscale(),
                 transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4],  # statistics calculated over 7scenes training set, should generalize fairly well
-                    std=[0.25]
-                ),
+                transforms.Normalize(mean=[0.4], std=[0.25]),
             ])
 
     def __len__(self):
@@ -114,15 +126,12 @@ class RealFakeDataset(Dataset):
         image = torch.from_numpy(image).permute(2, 0, 1).float()
         return image
     
-    def _get_single_item(self, idx, image_height):
+    def _get_single_item(self, idx, image_height, angle=None):
         try:
             real_image, fake_image = self._load_image_pair(idx)
         except Exception as e:
             logging.error(f"Error loading image pair at index {idx}: {str(e)}")
             raise
-
-        if self.augment:
-            angle = random.uniform(-self.aug_rotation, self.aug_rotation)
 
         real_image = self._resize_image(real_image, image_height)
         fake_image = self._resize_image(fake_image, image_height)
@@ -133,6 +142,8 @@ class RealFakeDataset(Dataset):
         fake_image = self.image_transform(fake_image)
 
         if self.augment:
+            if angle is None: angle = random.uniform(-self.aug_rotation, self.aug_rotation)
+            
             real_image = self._rotate_image(real_image, angle, 1, 'reflect')
             fake_image = self._rotate_image(fake_image, angle, 1, 'reflect')
             image_mask = self._rotate_image(image_mask, angle, 1, 'constant')
@@ -150,18 +161,23 @@ class RealFakeDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.augment:
-            scale_factor = random.uniform(self.aug_scale_min, self.aug_scale_max)
+            # scale_factor = random.uniform(self.aug_scale_min, self.aug_scale_max)
+
+            # Inverse scale sampling
+            scale = random.uniform(1/self.aug_scale_max, 1/self.aug_scale_min)
+            scale_factor = 1/scale
+
         else:
             scale_factor = 1
 
-        # Target image height. We compute it here in case we are asked for a full batch of tensors because we need
-        # to apply the same scale factor to all of them.
+        # Consistent scaling and rotation across batch
         image_height = int(self.image_height * scale_factor)
+        angle = random.uniform(-self.aug_rotation, self.aug_rotation)
 
         if isinstance(idx, list):
             # Whole batch.
-            tensors = [self._get_single_item(i, image_height) for i in idx]
+            tensors = [self._get_single_item(i, image_height, angle) for i in idx]
             return default_collate(tensors)
         else:
             # Single element.
-            return self._get_single_item(idx, image_height)
+            return self._get_single_item(idx, image_height, angle)
