@@ -70,17 +70,21 @@ class RealFakeDataset(Dataset):
 
         assert len(self.real_rgb_files) == len(self.fake_rgb_files), \
             f'Number of real images ({len(self.real_rgb_files)}) does not match number of rendered images ({len(self.fake_rgb_files)})'
+        
+
+        # TODO: separate spatial and visual transformations
+        # TODO: immplement visual transformations to real images only
 
 
         if self.augment:
             self.image_transform = transforms.Compose([
                 # transforms.ToPILImage(),
                 # transforms.Resize(int(self.image_height * scale_factor)),
-                transforms.ColorJitter(
-                    brightness=self.aug_brightness,
-                    contrast=self.aug_contrast,
-                    saturation=self.aug_saturation,
-                    hue=self.aug_hue),
+                # transforms.ColorJitter(
+                #     brightness=self.aug_brightness,
+                #     contrast=self.aug_contrast,
+                #     saturation=self.aug_saturation,
+                #     hue=self.aug_hue),
                 transforms.Grayscale(),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.4], std=[0.25]),
@@ -126,7 +130,7 @@ class RealFakeDataset(Dataset):
         image = torch.from_numpy(image).permute(2, 0, 1).float()
         return image
     
-    def _get_single_item(self, idx, image_height, angle=None):
+    def _get_single_item(self, idx, image_height, angle):
         try:
             real_image, fake_image = self._load_image_pair(idx)
         except Exception as e:
@@ -141,9 +145,7 @@ class RealFakeDataset(Dataset):
         real_image = self.image_transform(real_image)
         fake_image = self.image_transform(fake_image)
 
-        if self.augment:
-            if angle is None: angle = random.uniform(-self.aug_rotation, self.aug_rotation)
-            
+        if self.augment:            
             real_image = self._rotate_image(real_image, angle, 1, 'reflect')
             fake_image = self._rotate_image(fake_image, angle, 1, 'reflect')
             image_mask = self._rotate_image(image_mask, angle, 1, 'constant')
