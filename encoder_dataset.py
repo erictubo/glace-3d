@@ -25,23 +25,22 @@ class RealFakeDataset(Dataset):
             self,
             root_dir,
             augment=False,
+            use_half=True,
+            image_height=480,
+
             # aug_rotation=15,
             # aug_scale_min=2 / 3,
             # aug_scale_max=3 / 2,
             # aug_black_white=0.1,
             # aug_color=0.3,
-            # image_height=480,
-            # use_half=True,
 
-            use_half=True,
-            image_height=480,
-            aug_rotation=40,  # Increased to 40 degrees
-            aug_scale_min=240/480,  # Minimum scale factor
-            aug_scale_max=960/480,  # Maximum scale factor
-            aug_brightness=0.4,
-            aug_contrast=0.4,
-            aug_saturation=0.3,
-            aug_hue=0.3,
+            aug_rotation=40,
+            aug_scale_min=240/480,
+            aug_scale_max=960/480,
+            # aug_brightness=0.4,
+            # aug_contrast=0.4,
+            # aug_saturation=0.3,
+            # aug_hue=0.3,
         ):
 
         self.use_half = use_half
@@ -52,10 +51,10 @@ class RealFakeDataset(Dataset):
         self.aug_rotation = aug_rotation
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
-        self.aug_brightness = aug_brightness
-        self.aug_contrast = aug_contrast
-        self.aug_saturation = aug_saturation
-        self.aug_hue = aug_hue
+        # self.aug_brightness = aug_brightness
+        # self.aug_contrast = aug_contrast
+        # self.aug_saturation = aug_saturation
+        # self.aug_hue = aug_hue
 
         # self.aug_black_white = aug_black_white
         # self.aug_color = aug_color
@@ -73,7 +72,8 @@ class RealFakeDataset(Dataset):
         
 
         # TODO: separate spatial and visual transformations
-        # TODO: immplement visual transformations to real images only
+        # TODO: implement visual transformations to real images only
+        # TODO: consistent visual transformations across real and fake images (and batch)
 
 
         if self.augment:
@@ -86,6 +86,7 @@ class RealFakeDataset(Dataset):
                 #     saturation=self.aug_saturation,
                 #     hue=self.aug_hue),
                 transforms.Grayscale(),
+                # transforms.ColorJitter(brightness=self.aug_black_white, contrast=self.aug_black_white),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.4], std=[0.25]),
             ])
