@@ -7,15 +7,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, sampler
-import torch.distributed as dist
+from torch.utils.tensorboard import SummaryWriter
 
 from ace_network import Encoder
 from encoder_dataset import RealFakeDataset
 
 _logger = logging.getLogger(__name__)
+
 
 def custom_collate(batch):
     """
@@ -68,42 +70,29 @@ def custom_collate_with_negatives(batch):
             torch.stack(negative_images_padded))
 
 
-class LossLogger:
-    def __init__(self, log_interval):
-        self.log_interval = log_interval
-        self.train_losses = {}
-        self.val_losses = {}
-        self.train_iteration = 0
-        self.val_iteration = 0
+class TensorBoardLogger:
+    def __init__(self, log_dir, config):
+        self.writer = SummaryWriter(log_dir)
+        
+        # Log configuration
+        for key, value in config.items():
+            self.writer.add_text(f"config/{key}", str(value))
 
-    def log(self, loss_dict, mode='training'):
-        if mode == 'training':
-            losses = self.train_losses
-            self.train_iteration += 1
-            iteration = self.train_iteration
-        else:
-            losses = self.val_losses
-            self.val_iteration += 1
-            iteration = self.val_iteration
-
+    def log_train(self, loss_dict, iteration, epoch):
         for key, value in loss_dict.items():
-            if key not in losses:
-                losses[key] = 0
-            losses[key] += value
+            self.writer.add_scalar(f'train/{key}', value, iteration)
+        self.writer.add_scalar('epoch', epoch, iteration)
 
-        if iteration % self.log_interval == 0:
-            mean_losses = {k: v / self.log_interval for k, v in losses.items()}
-            log_str = f'{"Train" if mode == "training" else "Val"} Iter {iteration:6d}, '
-            log_str += ', '.join([f'{k}: {v:.6f}' for k, v in mean_losses.items()])
-            _logger.info(log_str)
-            if mode == 'training':
-                self.train_losses = {}
-            else:
-                self.val_losses = {}
+    def log_validation_epoch(self, loss_dict, epoch):
+        for key, value in loss_dict.items():
+            self.writer.add_scalar(f'validation_epoch/{key}', value, epoch)
 
-    def reset_val(self):
-        self.val_losses = {}
-        self.val_iteration = 0
+    def log_validation_iteration(self, loss_dict, iteration):
+        for key, value in loss_dict.items():
+            self.writer.add_scalar(f'validation/{key}', value, iteration)
+
+    def close(self):
+        self.writer.close()
 
 
 class TrainerEncoder:
@@ -158,135 +147,182 @@ class TrainerEncoder:
 
 
         # Optimizer
-        self.optimizer = Adam(
+        # self.optimizer = Adam(
+        #     filter(lambda p: p.requires_grad, self.encoder.parameters()),
+        #     lr=options.learning_rate,
+        # )
+        self.optimizer = AdamW(
             filter(lambda p: p.requires_grad, self.encoder.parameters()),
             lr=options.learning_rate,
+            weight_decay=self.options.weight_decay,
         )
+
+        # Learning rate scheduler
+        self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=2, verbose=True)
 
         # Gradient scaler
         self.scaler = GradScaler(enabled=self.options.use_half)
 
-        # Loss logger
-        self.loss_logger = LossLogger(log_interval=self.options.gradient_accumulation_steps)
 
+        # Tensorboard logger
+        config = {
+            'output_path': options.output_path,
+
+            'learning_rate': options.learning_rate,
+            'weight_decay': options.weight_decay,
+
+            'batch_size': options.batch_size,
+            'gradient_accumulation_samples': options.gradient_accumulation_samples,
+            'validation_frequency': options.validation_frequency,
+
+            'use_half': options.use_half,
+            'image_resolution': options.image_resolution,
+            'aug_rotation': options.aug_rotation,
+            'aug_scale_min': options.aug_scale_min,
+            'aug_scale_max': options.aug_scale_max,
+
+            'contrastive_weights': options.contrastive_weights,
+            'train_dataset_size': len(self.train_dataset),
+            'val_dataset_size': len(self.val_dataset),
+        }
+
+        self.logger = TensorBoardLogger(log_dir='runs/experiment_1', config=config)
+
+        self.epoch = 0
+        self.iteration = 0
+        self.training_start = None
 
         # Validation
         self.encoder.eval()
-        val_loss = self._validate('mse')
+        val_loss, val_loss_dict = self._validate('mse')
+        self.logger.log_validation_epoch(val_loss_dict, self.epoch)
 
         _logger.info(
             f'Initial Validation, '
             f'Loss: {val_loss:.6f}'
         )
 
-        self.iteration = 0
-        self.training_start = None
 
     def _load_datasets(self):
-        ds_args = dict(
-            use_half=self.options.use_half,
-            image_height=self.options.image_resolution,
-            augment=self.options.use_aug,
-            aug_rotation=self.options.aug_rotation,
-            aug_scale_max=self.options.aug_scale,
-            aug_scale_min=1 / self.options.aug_scale,
-        )
         
         train_dataset = RealFakeDataset(
             root_dir=self.options.data_path + "/train",
-            **ds_args,
+            augment=True,
+            use_half=self.options.use_half,
+            image_height=self.options.image_height,
         )
 
         val_dataset = RealFakeDataset(
             root_dir=self.options.data_path + "/validation",
-            **ds_args,
+            augment=False,
+            use_half=self.options.use_half,
+            image_height=self.options.image_height,
         )
 
         return train_dataset, val_dataset
+
+    """
+    TRAINING & VALIDATION
+    """
     
     def train(self, num_epochs):
 
         _logger.info(f"Starting training ...")
         self.training_start = time.time()
 
-        loss_type = 'mse'
 
         best_val_loss = float('inf')
-        for epoch in range(num_epochs):
 
-            if epoch == num_epochs // 2:
-                loss_type = 'cosine'
-                _logger.info(f"Switching to cosine loss at epoch {epoch+1}")
+        while self.epoch < num_epochs:
+
+            self.epoch += 1
+
+            if self.epoch <= num_epochs // 2:
+                loss_type = 'mse'
+            else:
+                loss_type = 'cosine
 
             self.encoder.train()
             train_loss = self._train_epoch(loss_type)
+
             
             self.encoder.eval()
-            val_loss = self._validate(loss_type)
+            val_loss, val_loss_dict = self._validate(loss_type)
+            self.logger.log_validation_epoch(val_loss_dict, self.epoch)
+
+            self.scheduler.step(val_loss)
+
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.logger.writer.add_scalar('learning_rate', current_lr, self.epoch)
+
             
-            _logger.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
+            _logger.info(f'Epoch [{self.epoch}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                _logger.info(f"Saving best model at epoch {epoch+1}")
-                self.save_model(f"{self.options.output_path.split('.')[0]}_e{epoch+1}.pt")
-            
-            # Early stopping (optional)
-            if self._early_stopping(val_loss):
-                _logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                _logger.info(f"Saving best model at epoch {self.epoch}")
+                self.save_model(f"{self.options.output_path.split('.')[0]}_e{self.epoch}.pt")
+            else:
+                _logger.info(f"Stopping training because validation loss did not improve")
                 break
+        
+        self.logger.close()
         
     def _train_epoch(self, loss_type):
 
         total_loss = 0.0
+        accumulated_loss = 0.0
+        accumulated_loss_dict = {}
 
-        for real_images, fake_images, other_fake_images in self.train_loader:
+        for real_images, fake_images, diff_images in self.train_loader:
+
+            self.iteration += 1
 
             real_images = real_images.to(self.device)
             fake_images = fake_images.to(self.device)
-            other_fake_images = other_fake_images.to(self.device)
+            diff_images = diff_images.to(self.device)
 
-            loss = self._compute_combined_loss(real_images, fake_images, other_fake_images, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_combined_loss(real_images, fake_images, diff_images, mode='training', loss_type=loss_type)
+            accumulated_loss += loss
+            total_loss += loss.item()
+
+            for key, value in loss_dict.items():
+                accumulated_loss_dict[key] = accumulated_loss_dict.get(key, 0) + value
 
             loss /= self.options.gradient_accumulation_steps
-
             self.scaler.scale(loss).backward()
-
-            self.iteration += 1
 
             if self.iteration % self.options.gradient_accumulation_steps == 0:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
 
-            total_loss += loss.item() * self.options.gradient_accumulation_steps
+                total_norm = self._compute_gradient_norm()
+                self.logger.writer.add_scalar('gradient_norm', total_norm, self.iteration)
 
-            # if self.iteration % 1 == 0:
-            #     time_since_start = time.time() - self.training_start
-            #     _logger.info(
-            #         f'Iter {self.iteration:6d}, '
-            #         f'Loss: {loss:.6f}, '
-            #         f'Time: {time_since_start:.2f}s'
-            #     )
+                # Log average losses
+                avg_loss_dict = {k: v / self.options.gradient_accumulation_steps for k, v in accumulated_loss_dict.items()}
+                self.logger.log_train(avg_loss_dict, self.iteration, self.epoch)
+                accumulated_loss_dict = {}
 
-            # if self.iteration % 100 == 0:
-            #     _logger.info(f'Saving model at iteration {self.iteration}')
-            #     self.save_model(f"{self.options.output_path.split('.')[0]}_iter{self.iteration}.pt")
-            #     self.encoder.eval()
-            #     val_los = self._validate()
-            #     _logger.info(
-            #         f'Validation Iter {self.iteration:6d},
-            #         f'Loss: {val_loss:.6f}'
-            #     )
+                _logger.info(f'Iteration {self.iteration}, Loss: {accumulated_loss:.6f}')
+                accumulated_loss = 0.0
 
+                if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
+                    val_loss, val_loss_dict = self._validate(loss_type)
+                    self.logger.log_validation_iteration(val_loss_dict, self.iteration)
+                    _logger.info(f'Iteration {self.iteration}, Val Loss: {val_loss:.6f}')
+
+                    # Save model
+                    _logger.info(f"Saving model at iteration {self.iteration}")
+                    self.save_model(f"{self.options.output_path.split('.')[0]}_i{self.iteration}.pt")
                         
         return total_loss / len(self.train_loader)
     
     def _validate(self, loss_type):
         
-        self.loss_logger.reset_val()
-
         total_loss = 0.0
+        accumulated_loss_dict = {}
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
             for real_images, fake_images, diff_images in self.val_loader:
@@ -295,11 +331,21 @@ class TrainerEncoder:
                 fake_images = fake_images.to(self.device)
                 diff_images = diff_images.to(self.device)
 
-                loss = self._compute_combined_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
-
+                loss, loss_dict = self._compute_combined_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
                 total_loss += loss.item()
 
-        return total_loss / len(self.val_loader)
+                # Accumulate losses
+                for key, value in loss_dict.items():
+                    accumulated_loss_dict[key] = accumulated_loss_dict.get(key, 0) + value
+            
+        # Calculate average losses
+        avg_loss_dict = {k: v / len(self.val_loader) for k, v in accumulated_loss_dict.items()}
+
+        return total_loss / len(self.val_loader), avg_loss_dict
+
+    """
+    LOSS FUNCTIONS
+    """
 
     def magnitude_loss(self, features, target_value=1.0, margin=0.05):
         
@@ -331,65 +377,65 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def _compute_separate_loss(self, real_image, fake_image, diff_image, mode, loss_type):
-        """
-        Loss for separate encoder to get fake_features close to real_init_features.
-        """
+    # def _compute_separate_loss(self, real_image, fake_image, diff_image, mode, loss_type):
+    #     """
+    #     Loss for separate encoder to get fake_features close to real_init_features.
+    #     """
 
-        assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
+    #     assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
 
-        assert mode in ['training', 'validation']
+    #     assert mode in ['training', 'validation']
 
-        with autocast(enabled=self.options.use_half):
+    #     with autocast(enabled=self.options.use_half):
 
-            with torch.no_grad():
-                real_init_features = self.initial_encoder(real_image)
+    #         with torch.no_grad():
+    #             real_init_features = self.initial_encoder(real_image)
 
-            with torch.no_grad() if mode=='validation' else torch.enable_grad():
+    #         with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-                fake_features = self.encoder(fake_image)
-                diff_features = self.encoder(diff_image)
+    #             fake_features = self.encoder(fake_image)
+    #             diff_features = self.encoder(diff_image)
 
-                # Magnitudes
-                fake_magnitude = self.magnitude_loss(fake_features)
-                diff_magnitude = self.magnitude_loss(diff_features)
+    #             # Magnitudes
+    #             fake_magnitude = self.magnitude_loss(fake_features)
+    #             diff_magnitude = self.magnitude_loss(diff_features)
 
-            magnitudes = fake_magnitude + diff_magnitude
+    #         magnitudes = fake_magnitude + diff_magnitude
 
-            # MSE loss
-            fake_vs_init_mse = self.mse_loss(fake_features, real_init_features)
-            fake_vs_diff_mse = self.mse_loss(fake_features, diff_features, target_value=1.0)
 
-            # Cosine loss
-            fake_vs_init_cos = self.cosine_loss(fake_features, real_init_features, target_value=1, margin=0.2)
-            fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
+    #         # MSE loss
+    #         fake_vs_init_mse = self.mse_loss(fake_features, real_init_features)
+    #         fake_vs_diff_mse = self.mse_loss(fake_features, diff_features, target_value=1.0)
 
-            a, b = 1.0, 0.0
+    #         # Cosine loss
+    #         fake_vs_init_cos = self.cosine_loss(fake_features, real_init_features, target_value=1, margin=0.2)
+    #         fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
+
+
+    #         a, b = 1.0, 0.0
             
-            if loss_type == 'mse':
-                contrastive_loss = a * fake_vs_init_mse + b * fake_vs_diff_mse
-            elif loss_type == 'cosine':
-                contrastive_loss = a * fake_vs_init_cos + b * fake_vs_diff_cos
+    #         if loss_type == 'mse':
+    #             contrastive_loss = a * fake_vs_init_mse + b * fake_vs_diff_mse
+    #         elif loss_type == 'cosine':
+    #             contrastive_loss = a * fake_vs_init_cos + b * fake_vs_diff_cos
             
-            loss = contrastive_loss + magnitudes
+    #         loss = contrastive_loss + magnitudes
 
 
-            loss_dict = {
-                'F-I_cos': fake_vs_init_cos.item(),
-                'F-D_cos': fake_vs_diff_cos.item(),
+    #         loss_dict = {
+    #             'F-I_cos': fake_vs_init_cos.item(),
+    #             'F-D_cos': fake_vs_diff_cos.item(),
 
-                'F-I_mse': fake_vs_init_mse.item(),
-                'F-D_mse': fake_vs_diff_mse.item(),
+    #             'F-I_mse': fake_vs_init_mse.item(),
+    #             'F-D_mse': fake_vs_diff_mse.item(),
 
-                '|F|': fake_magnitude.item(),
-                '|D|': diff_magnitude.item(),
+    #             '|F|': fake_magnitude.item(),
+    #             '|D|': diff_magnitude.item(),
 
-                'Total': loss.item(),
-            }
+    #             'Total': loss.item(),
+    #         }
 
-            self.loss_logger.log(loss_dict, mode)
-
-            return loss
+    #         return loss, loss_dict
     
     def _compute_combined_loss(self, real_image, fake_image, diff_image, mode, loss_type):
         """
@@ -430,7 +476,7 @@ class TrainerEncoder:
             real_vs_init_mse = self.mse_loss(real_features, real_init_features)
 
             
-            a, b, c = 0.5, 0.2, 0.3
+            a, b, c = self.options.contrastive_weights
 
             if loss_type == 'mse':
                 contrastive_loss = a * real_vs_fake_mse + b * fake_vs_diff_mse + c * real_vs_init_mse
@@ -456,20 +502,20 @@ class TrainerEncoder:
 
                 'Total': loss.item(),
             }
-
-            # TODO: logging on tensorboard
-            
-            self.loss_logger.log(loss_dict, mode)
-
-        return loss
-
-    def _early_stopping(self, val_loss):
-        # Implement early stopping logic here
-        # For example, stop if validation loss hasn't improved for X epochs
-        pass
+        
+        return loss, loss_dict
         
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
+
+    def _compute_gradient_norm(self):
+        total_norm = 0
+        for p in self.encoder.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        return total_norm
 
 
 if __name__ == "__main__":
@@ -479,17 +525,22 @@ if __name__ == "__main__":
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
             self.output_path = "output_encoder/fine-tuned_encoder_no_color_aug.pt"
-            self.learning_rate = 0.0005
-            self.contrastive_weights = (0.4, 0.3, 0.3)
-            # self.loss_weight = 0.5
 
-            self.use_half = True
-            self.image_resolution = 480
-            self.use_aug = True
-            self.aug_rotation = 15
-            self.aug_scale = 1.5
+            self.learning_rate = 0.0005
+            self.weight_decay = 0.01
+
             self.batch_size = 4
             self.gradient_accumulation_samples = 40
+            self.validation_frequency = 10
+
+            self.use_half = True
+            self.image_height = 480
+            self.aug_rotation = 15
+            self.aug_scale_min = 2/3
+            self.aug_scale_max = 3/2
+
+            self.contrastive_weights = (0.5, 0.25, 0.25)
+
 
     logging.basicConfig(level=logging.INFO)
 
