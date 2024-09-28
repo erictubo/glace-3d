@@ -26,22 +26,23 @@ class CamLocDataset(Dataset):
     Access to image, calibration and ground truth data given a dataset directory.
     """
 
-    def __init__(self,
-                 root_dir,
-                 mode=0,
-                 sparse=False,
-                 augment=False,
-                 aug_rotation=15,
-                 aug_scale_min=2 / 3,
-                 aug_scale_max=3 / 2,
-                 aug_black_white=0.1,
-                 aug_color=0.3,
-                 image_height=480,
-                 use_half=True,
-                 num_clusters=None,
-                 cluster_idx=None,
-                 feat_name='features.npy',
-                 ):
+    def __init__(
+            self,
+            root_dir,
+            mode=0,
+            sparse=False,
+            augment=False,
+            aug_rotation=15,
+            aug_scale_min=2 / 3,
+            aug_scale_max=3 / 2,
+            aug_black_white=0.1,
+            aug_color=0.3,
+            image_height=480,
+            use_half=True,
+            num_clusters=None,
+            cluster_idx=None,
+            feat_name='features.npy',
+        ):
         """Constructor.
 
         Parameters:
