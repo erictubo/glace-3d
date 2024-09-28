@@ -80,7 +80,7 @@ class TrainerACE:
 
         # Create dataset.
         ds_args=dict(
-            mode=self.options.mode,  # Default for ACE, we don't need scene coordinates/RGB-D.
+            mode=1, # self.options.mode, # always generate scene coordinates to be able to switch between loss types
             sparse=self.options.sparse,
             use_half=self.options.use_half,
             image_height=self.options.image_resolution,
@@ -162,11 +162,6 @@ class TrainerACE:
             type=self.options.repro_loss_type,
             circle_schedule=(self.options.repro_loss_schedule == 'circle')
         )
-
-        # Setup Euclidean distance loss function.
-        # self.euclidean_loss = EuclideanDistanceLoss(
-        #     # TODO: Add parameters from new options.
-        # )
 
         # Will be filled at the beginning of the training process.
         self.training_buffer = None
@@ -378,9 +373,10 @@ class TrainerACE:
                         'gt_poses_inv': gt_pose_inv,
                         'intrinsics': intrinsics,
                         'intrinsics_inv': intrinsics_inv,
+                        'gt_scene_coords': normalize_shape(gt_scene_coords_B3HW), # shape Nx3
                     }
-                    if self.options.mode == 1:
-                        batch_data['gt_scene_coords'] = normalize_shape(gt_scene_coords_B3HW) # shape Nx3
+                    # if self.options.mode == 1:
+                    #     batch_data['gt_scene_coords'] = normalize_shape(gt_scene_coords_B3HW) # shape Nx3
 
                     # Turn image mask into sampling weights (all equal).
                     image_mask_B1HW = image_mask_B1HW.float()
@@ -462,6 +458,11 @@ class TrainerACE:
             # Save checkpoint periodically
             if self.iteration % self.options.checkpoint_interval == 0:
                 self.save_checkpoint()
+
+            # switch modes after half iterations
+            if self.iteration == self.options.max_iterations // 2 and self.options.mode == 1:
+                self.options.mode = 0
+                _logger.info(f"Switched from 3D Euclidean distance loss to unsupervised reprojection loss.")
             
             if self.iteration >= self.options.max_iterations:
                 break
