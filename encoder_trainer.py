@@ -206,10 +206,7 @@ class TrainerEncoder:
         val_loss, val_loss_dict = self._validate('mse')
         self.logger.log_validation_epoch(val_loss_dict, self.epoch)
 
-        _logger.info(
-            f'Initial Validation, '
-            f'Loss: {val_loss:.6f}'
-        )
+        _logger.info(f'Validation Loss: {val_loss:.6f}')
 
         self.train()
         self.save_model(self.options.output_path)
@@ -249,10 +246,11 @@ class TrainerEncoder:
 
             self.epoch += 1
 
-            if self.epoch <= self.options.num_epochs // 2:
-                loss_type = 'mse'
-            else:
-                loss_type = 'cosine'
+            loss_type = 'mse'
+            # if self.epoch <= self.options.num_epochs // 2:
+            #     loss_type = 'mse'
+            # else:
+            #     loss_type = 'cosine'
 
             self.encoder.train()
             train_loss = self._train_epoch(loss_type)
@@ -268,7 +266,7 @@ class TrainerEncoder:
             self.logger.writer.add_scalar('learning_rate', current_lr, self.epoch)
 
             
-            _logger.info(f'Epoch [{self.epoch}/{self.options.num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
+            _logger.info(f'Epoch [{self.epoch}/{self.options.num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f} (type: {loss_type})')
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -317,17 +315,18 @@ class TrainerEncoder:
                 self.logger.log_train(avg_loss_dict, self.iteration, self.epoch)
                 accumulated_loss_dict = {}
 
-                _logger.info(f'Iteration {self.iteration}, Loss: {accumulated_loss:.6f}')
+                accumulated_loss /= self.options.gradient_accumulation_steps
+                _logger.info(f'Iteration {self.iteration}, Loss: {accumulated_loss:.6f} (type: {loss_type})')
                 accumulated_loss = 0.0
 
-                if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
-                    val_loss, val_loss_dict = self._validate(loss_type)
-                    self.logger.log_validation_iteration(val_loss_dict, self.iteration)
-                    _logger.info(f'Iteration {self.iteration}, Val Loss: {val_loss:.6f}')
+                # if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
+                #     val_loss, val_loss_dict = self._validate(loss_type)
+                #     self.logger.log_validation_iteration(val_loss_dict, self.iteration)
+                #     _logger.info(f'Iteration {self.iteration}, Val Loss: {val_loss:.6f}')
 
-                    # Save model
-                    _logger.info(f"Saving model at iteration {self.iteration}")
-                    self.save_model(f"{self.options.output_path.split('.')[0]}_i{self.iteration}.pt")
+                #     # Save model
+                #     _logger.info(f"Saving model at iteration {self.iteration}")
+                #     self.save_model(f"{self.options.output_path.split('.')[0]}_i{self.iteration}.pt")
                         
         return total_loss / len(self.train_loader)
     
@@ -394,7 +393,7 @@ class TrainerEncoder:
         Loss for separate encoder to get fake_features close to real_init_features.
         """
 
-        assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
+        # assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
 
         assert mode in ['training', 'validation']
 
@@ -412,37 +411,37 @@ class TrainerEncoder:
                 fake_magnitude = self.magnitude_loss(fake_features)
                 diff_magnitude = self.magnitude_loss(diff_features)
 
-            magnitudes = fake_magnitude + diff_magnitude
+            magnitudes = fake_magnitude #+ diff_magnitude
 
 
             # MSE loss
-            fake_vs_init_mse = self.mse_loss(fake_features, real_init_features)
-            fake_vs_diff_mse = self.mse_loss(fake_features, diff_features, target_value=1.0)
+            fake_vs_init_mse = 200* self.mse_loss(fake_features, real_init_features)
+            # fake_vs_diff_mse = 200* self.mse_loss(fake_features, diff_features, target_value=1.0)
 
             # Cosine loss
             fake_vs_init_cos = self.cosine_loss(fake_features, real_init_features, target_value=1, margin=0.2)
-            fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
+            # fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
 
 
             a, b = 1.0, 0.0
             
             if loss_type == 'mse':
-                contrastive_loss = a * fake_vs_init_mse + b * fake_vs_diff_mse
+                contrastive_loss = a * fake_vs_init_mse # + b * fake_vs_diff_mse
             elif loss_type == 'cosine':
-                contrastive_loss = a * fake_vs_init_cos + b * fake_vs_diff_cos
+                contrastive_loss = a * fake_vs_init_cos # + b * fake_vs_diff_cos
             
             loss = contrastive_loss + magnitudes
 
 
             loss_dict = {
                 'F-I_cos': fake_vs_init_cos.item(),
-                'F-D_cos': fake_vs_diff_cos.item(),
+                # 'F-D_cos': fake_vs_diff_cos.item(),
 
                 'F-I_mse': fake_vs_init_mse.item(),
-                'F-D_mse': fake_vs_diff_mse.item(),
+                # 'F-D_mse': fake_vs_diff_mse.item(),
 
                 '|F|': fake_magnitude.item(),
-                '|D|': diff_magnitude.item(),
+                # '|D|': diff_magnitude.item(),
 
                 'Total': loss.item(),
             }
@@ -483,9 +482,9 @@ class TrainerEncoder:
     #         real_vs_init_cos = self.cosine_loss(real_features, real_init_features, target_value=1, margin=0.2)
 
     #         # MSE loss
-    #         real_vs_fake_mse = 100* self.mse_loss(real_features, fake_features)
-    #         fake_vs_diff_mse = 100* self.mse_loss(fake_features, diff_features, target_value=1.0)
-    #         real_vs_init_mse = 100* self.mse_loss(real_features, real_init_features)
+    #         real_vs_fake_mse = 200* self.mse_loss(real_features, fake_features)
+    #         fake_vs_diff_mse = 200* self.mse_loss(fake_features, diff_features, target_value=1.0)
+    #         real_vs_init_mse = 200* self.mse_loss(real_features, real_init_features)
 
             
     #         a, b, c = self.options.contrastive_weights
@@ -542,16 +541,16 @@ if __name__ == "__main__":
             self.learning_rate = 0.0001 # Validate
             self.weight_decay = 0.01    # Validate
 
-            self.num_epochs = 4
+            self.num_epochs = 8
             self.batch_size = 2
             self.gradient_accumulation_samples = 40
             self.validation_frequency = 10
 
             self.use_half = True
             self.image_height = 480
-            self.aug_rotation = 15
-            self.aug_scale_min = 2/3
-            self.aug_scale_max = 3/2
+            self.aug_rotation = 40
+            self.aug_scale_min = 240/480
+            self.aug_scale_max = 960/480
 
             self.contrastive_weights = (0.5, 0.25, 0.25)
 
