@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import LinearLR
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, sampler
 from torch.utils.tensorboard import SummaryWriter
@@ -153,12 +153,17 @@ class TrainerEncoder:
         # )
         self.optimizer = AdamW(
             filter(lambda p: p.requires_grad, self.encoder.parameters()),
-            lr=options.learning_rate,
+            lr=self.options.learning_rate,
             weight_decay=self.options.weight_decay,
         )
 
         # Learning rate scheduler
-        self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+        self.scheduler = LinearLR(
+            self.optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=self.options.num_epochs,
+        )
 
         # Gradient scaler
         self.scaler = GradScaler(enabled=self.options.use_half)
@@ -171,12 +176,13 @@ class TrainerEncoder:
             'learning_rate': options.learning_rate,
             'weight_decay': options.weight_decay,
 
+            'num_epochs' : options.num_epochs,
             'batch_size': options.batch_size,
             'gradient_accumulation_samples': options.gradient_accumulation_samples,
             'validation_frequency': options.validation_frequency,
 
             'use_half': options.use_half,
-            'image_resolution': options.image_resolution,
+            'image_height': options.image_height,
             'aug_rotation': options.aug_rotation,
             'aug_scale_min': options.aug_scale_min,
             'aug_scale_max': options.aug_scale_max,
@@ -186,7 +192,10 @@ class TrainerEncoder:
             'val_dataset_size': len(self.val_dataset),
         }
 
-        self.logger = TensorBoardLogger(log_dir='runs/experiment_1', config=config)
+        self.logger = TensorBoardLogger(
+            log_dir='runs/' + options.experiment_name,
+            config=config,
+        )
 
         self.epoch = 0
         self.iteration = 0
@@ -201,6 +210,9 @@ class TrainerEncoder:
             f'Initial Validation, '
             f'Loss: {val_loss:.6f}'
         )
+
+        self.train()
+        self.save_model(self.options.output_path)
 
 
     def _load_datasets(self):
@@ -225,7 +237,7 @@ class TrainerEncoder:
     TRAINING & VALIDATION
     """
     
-    def train(self, num_epochs):
+    def train(self):
 
         _logger.info(f"Starting training ...")
         self.training_start = time.time()
@@ -233,14 +245,14 @@ class TrainerEncoder:
 
         best_val_loss = float('inf')
 
-        while self.epoch < num_epochs:
+        while self.epoch < self.options.num_epochs:
 
             self.epoch += 1
 
-            if self.epoch <= num_epochs // 2:
+            if self.epoch <= self.options.num_epochs // 2:
                 loss_type = 'mse'
             else:
-                loss_type = 'cosine
+                loss_type = 'cosine'
 
             self.encoder.train()
             train_loss = self._train_epoch(loss_type)
@@ -256,7 +268,7 @@ class TrainerEncoder:
             self.logger.writer.add_scalar('learning_rate', current_lr, self.epoch)
 
             
-            _logger.info(f'Epoch [{self.epoch}/{num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
+            _logger.info(f'Epoch [{self.epoch}/{self.options.num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -282,7 +294,7 @@ class TrainerEncoder:
             fake_images = fake_images.to(self.device)
             diff_images = diff_images.to(self.device)
 
-            loss, loss_dict = self._compute_combined_loss(real_images, fake_images, diff_images, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_separate_loss(real_images, fake_images, diff_images, mode='training', loss_type=loss_type)
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -331,7 +343,7 @@ class TrainerEncoder:
                 fake_images = fake_images.to(self.device)
                 diff_images = diff_images.to(self.device)
 
-                loss, loss_dict = self._compute_combined_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
+                loss, loss_dict = self._compute_separate_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -377,69 +389,9 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    # def _compute_separate_loss(self, real_image, fake_image, diff_image, mode, loss_type):
-    #     """
-    #     Loss for separate encoder to get fake_features close to real_init_features.
-    #     """
-
-    #     assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
-
-    #     assert mode in ['training', 'validation']
-
-    #     with autocast(enabled=self.options.use_half):
-
-    #         with torch.no_grad():
-    #             real_init_features = self.initial_encoder(real_image)
-
-    #         with torch.no_grad() if mode=='validation' else torch.enable_grad():
-
-    #             fake_features = self.encoder(fake_image)
-    #             diff_features = self.encoder(diff_image)
-
-    #             # Magnitudes
-    #             fake_magnitude = self.magnitude_loss(fake_features)
-    #             diff_magnitude = self.magnitude_loss(diff_features)
-
-    #         magnitudes = fake_magnitude + diff_magnitude
-
-
-    #         # MSE loss
-    #         fake_vs_init_mse = self.mse_loss(fake_features, real_init_features)
-    #         fake_vs_diff_mse = self.mse_loss(fake_features, diff_features, target_value=1.0)
-
-    #         # Cosine loss
-    #         fake_vs_init_cos = self.cosine_loss(fake_features, real_init_features, target_value=1, margin=0.2)
-    #         fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
-
-
-    #         a, b = 1.0, 0.0
-            
-    #         if loss_type == 'mse':
-    #             contrastive_loss = a * fake_vs_init_mse + b * fake_vs_diff_mse
-    #         elif loss_type == 'cosine':
-    #             contrastive_loss = a * fake_vs_init_cos + b * fake_vs_diff_cos
-            
-    #         loss = contrastive_loss + magnitudes
-
-
-    #         loss_dict = {
-    #             'F-I_cos': fake_vs_init_cos.item(),
-    #             'F-D_cos': fake_vs_diff_cos.item(),
-
-    #             'F-I_mse': fake_vs_init_mse.item(),
-    #             'F-D_mse': fake_vs_diff_mse.item(),
-
-    #             '|F|': fake_magnitude.item(),
-    #             '|D|': diff_magnitude.item(),
-
-    #             'Total': loss.item(),
-    #         }
-
-    #         return loss, loss_dict
-    
-    def _compute_combined_loss(self, real_image, fake_image, diff_image, mode, loss_type):
+    def _compute_separate_loss(self, real_image, fake_image, diff_image, mode, loss_type):
         """
-        Contrastive loss function + magnitude loss.
+        Loss for separate encoder to get fake_features close to real_init_features.
         """
 
         assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
@@ -453,57 +405,117 @@ class TrainerEncoder:
 
             with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-                real_features = self.encoder(real_image)
                 fake_features = self.encoder(fake_image)
                 diff_features = self.encoder(diff_image)
 
                 # Magnitudes
-                real_magnitude = self.magnitude_loss(real_features)
                 fake_magnitude = self.magnitude_loss(fake_features)
                 diff_magnitude = self.magnitude_loss(diff_features)
 
-            magnitudes = real_magnitude + fake_magnitude + diff_magnitude
+            magnitudes = fake_magnitude + diff_magnitude
 
-
-            # Cosine loss
-            real_vs_fake_cos = self.cosine_loss(real_features, fake_features, target_value=1, margin=0.1)
-            fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
-            real_vs_init_cos = self.cosine_loss(real_features, real_init_features, target_value=1, margin=0.2)
 
             # MSE loss
-            real_vs_fake_mse = self.mse_loss(real_features, fake_features)
+            fake_vs_init_mse = self.mse_loss(fake_features, real_init_features)
             fake_vs_diff_mse = self.mse_loss(fake_features, diff_features, target_value=1.0)
-            real_vs_init_mse = self.mse_loss(real_features, real_init_features)
 
+            # Cosine loss
+            fake_vs_init_cos = self.cosine_loss(fake_features, real_init_features, target_value=1, margin=0.2)
+            fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
+
+
+            a, b = 1.0, 0.0
             
-            a, b, c = self.options.contrastive_weights
-
             if loss_type == 'mse':
-                contrastive_loss = a * real_vs_fake_mse + b * fake_vs_diff_mse + c * real_vs_init_mse
-
+                contrastive_loss = a * fake_vs_init_mse + b * fake_vs_diff_mse
             elif loss_type == 'cosine':
-                contrastive_loss = a * real_vs_fake_cos + b * fake_vs_diff_cos + c * real_vs_init_cos
-
+                contrastive_loss = a * fake_vs_init_cos + b * fake_vs_diff_cos
+            
             loss = contrastive_loss + magnitudes
 
 
             loss_dict = {
-                'R-F_cos': real_vs_fake_cos.item(),
+                'F-I_cos': fake_vs_init_cos.item(),
                 'F-D_cos': fake_vs_diff_cos.item(),
-                'R-I_cos': real_vs_init_cos.item(),
 
-                'R-F_mse': real_vs_fake_mse.item(),
+                'F-I_mse': fake_vs_init_mse.item(),
                 'F-D_mse': fake_vs_diff_mse.item(),
-                'R-I_mse': real_vs_init_mse.item(),
 
-                '|R|': real_magnitude.item(),
                 '|F|': fake_magnitude.item(),
                 '|D|': diff_magnitude.item(),
 
                 'Total': loss.item(),
             }
+
+            return loss, loss_dict
+    
+    # def _compute_combined_loss(self, real_image, fake_image, diff_image, mode, loss_type):
+    #     """
+    #     Contrastive loss function + magnitude loss.
+    #     """
+
+    #     assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
+
+    #     assert mode in ['training', 'validation']
+
+    #     with autocast(enabled=self.options.use_half):
+
+    #         with torch.no_grad():
+    #             real_init_features = self.initial_encoder(real_image)
+
+    #         with torch.no_grad() if mode=='validation' else torch.enable_grad():
+
+    #             real_features = self.encoder(real_image)
+    #             fake_features = self.encoder(fake_image)
+    #             diff_features = self.encoder(diff_image)
+
+    #             # Magnitudes
+    #             real_magnitude = self.magnitude_loss(real_features)
+    #             fake_magnitude = self.magnitude_loss(fake_features)
+    #             diff_magnitude = self.magnitude_loss(diff_features)
+
+    #         magnitudes = real_magnitude + fake_magnitude + diff_magnitude
+
+
+    #         # Cosine loss
+    #         real_vs_fake_cos = self.cosine_loss(real_features, fake_features, target_value=1, margin=0.1)
+    #         fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
+    #         real_vs_init_cos = self.cosine_loss(real_features, real_init_features, target_value=1, margin=0.2)
+
+    #         # MSE loss
+    #         real_vs_fake_mse = 100* self.mse_loss(real_features, fake_features)
+    #         fake_vs_diff_mse = 100* self.mse_loss(fake_features, diff_features, target_value=1.0)
+    #         real_vs_init_mse = 100* self.mse_loss(real_features, real_init_features)
+
+            
+    #         a, b, c = self.options.contrastive_weights
+
+    #         if loss_type == 'mse':
+    #             contrastive_loss = a * real_vs_fake_mse + b * fake_vs_diff_mse + c * real_vs_init_mse
+
+    #         elif loss_type == 'cosine':
+    #             contrastive_loss = a * real_vs_fake_cos + b * fake_vs_diff_cos + c * real_vs_init_cos
+
+    #         loss = contrastive_loss + magnitudes
+
+
+    #         loss_dict = {
+    #             'R-F_cos': real_vs_fake_cos.item(),
+    #             'F-D_cos': fake_vs_diff_cos.item(),
+    #             'R-I_cos': real_vs_init_cos.item(),
+
+    #             'R-F_mse': real_vs_fake_mse.item(),
+    #             'F-D_mse': fake_vs_diff_mse.item(),
+    #             'R-I_mse': real_vs_init_mse.item(),
+
+    #             '|R|': real_magnitude.item(),
+    #             '|F|': fake_magnitude.item(),
+    #             '|D|': diff_magnitude.item(),
+
+    #             'Total': loss.item(),
+    #         }
         
-        return loss, loss_dict
+    #     return loss, loss_dict
         
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
@@ -524,12 +536,14 @@ if __name__ == "__main__":
         def __init__(self):
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
-            self.output_path = "output_encoder/fine-tuned_encoder_no_color_aug.pt"
+            self.output_path = "output_encoder/fine-tuned_encoder_separate.pt"
+            self.experiment_name = 'separate 1'
 
-            self.learning_rate = 0.0005
-            self.weight_decay = 0.01
+            self.learning_rate = 0.0001 # Validate
+            self.weight_decay = 0.01    # Validate
 
-            self.batch_size = 4
+            self.num_epochs = 4
+            self.batch_size = 2
             self.gradient_accumulation_samples = 40
             self.validation_frequency = 10
 
@@ -546,5 +560,4 @@ if __name__ == "__main__":
 
     options = Options()
     trainer = TrainerEncoder(options)
-    trainer.train(num_epochs=4)
-    trainer.save_model(options.output_path)
+    
