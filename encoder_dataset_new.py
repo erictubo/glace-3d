@@ -5,7 +5,7 @@ import numpy as np
 
 import torch
 from torch.utils.data import Dataset
-from torch.nn.functional import F
+import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.transforms import functional as TF
 from skimage import io
@@ -198,23 +198,6 @@ class RealFakeDataset(Dataset):
             f"Shape mismatch: real {real_image.shape}, fake {fake_image.shape}, diff {diff_image.shape}, mask {image_mask.shape}"
             
         return real_image, fake_image, diff_image, image_mask
-    
-    def _custom_collate(self, batch):
-        real_images, fake_images, diff_images, masks = zip(*batch)
-
-        # Find max dimensions
-        max_height = max([img.shape[1] for img in real_images])
-        max_width = max([img.shape[2] for img in real_images])
-
-        def pad_tensor(x):
-            return F.pad(x, (0, max_width - x.shape[2], 0, max_height - x.shape[1]))
-
-        real_images_padded = torch.stack([pad_tensor(img) for img in real_images])
-        fake_images_padded = torch.stack([pad_tensor(img) for img in fake_images])
-        diff_images_padded = torch.stack([pad_tensor(img) for img in diff_images])
-        masks_padded = torch.stack([pad_tensor(mask.float()).bool() for mask in masks])
-
-        return real_images_padded, fake_images_padded, diff_images_padded, masks_padded
 
     def __getitem__(self, idx):
         if self.augment:
@@ -228,6 +211,28 @@ class RealFakeDataset(Dataset):
 
         if isinstance(idx, list):
             tensors = [self._get_single_item(i, image_height, angle) for i in idx]
-            return self._custom_collate(tensors)
+            return tensors
         else:
             return self._get_single_item(idx, image_height, angle)
+
+
+def custom_collate(batch):
+    real_images, fake_images, diff_images, masks = zip(*batch)
+
+    # Find max dimensions
+    max_height = max([img.shape[1] for img in real_images])
+    max_width = max([img.shape[2] for img in real_images])
+
+    def pad_tensor(x):
+        return F.pad(x, (0, max_width - x.shape[2], 0, max_height - x.shape[1]))
+
+    real_images_padded = torch.stack([pad_tensor(img) for img in real_images])
+    fake_images_padded = torch.stack([pad_tensor(img) for img in fake_images])
+    diff_images_padded = torch.stack([pad_tensor(img) for img in diff_images])
+    masks_padded = torch.stack([pad_tensor(mask.float()).bool() for mask in masks])
+
+    assert real_images_padded.shape == fake_images_padded.shape == diff_images_padded.shape == masks_padded.shape, \
+        f"Shape mismatch: real {real_images_padded.shape}, fake {fake_images_padded.shape}, " \
+        f"diff {diff_images_padded.shape}, mask {masks_padded.shape}"
+
+    return real_images_padded, fake_images_padded, diff_images_padded, masks_padded
