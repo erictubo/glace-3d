@@ -253,15 +253,16 @@ class TrainerEncoder:
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for real_images, fake_images, diff_images, masks in self.train_loader:
+        for real_image, fake_image, diff_image, image_mask in self.train_loader:
 
             self.iteration += 1
 
-            real_images = real_images.to(self.device)
-            fake_images = fake_images.to(self.device)
-            diff_images = diff_images.to(self.device)
+            real_image = real_image.to(self.device)
+            fake_image = fake_image.to(self.device)
+            diff_image = diff_image.to(self.device)
+            image_mask = image_mask.to(self.device)
 
-            loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, masks, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, image_mask, mode='training', loss_type=loss_type)
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -305,13 +306,14 @@ class TrainerEncoder:
         accumulated_loss_dict = {}
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_images, fake_images, diff_images, masks in self.val_loader:
+            for real_image, fake_image, diff_image, image_mask in self.val_loader:
 
-                real_images = real_images.to(self.device)
-                fake_images = fake_images.to(self.device)
-                diff_images = diff_images.to(self.device)
+                real_image = real_image.to(self.device)
+                fake_image = fake_image.to(self.device)
+                diff_image = diff_image.to(self.device)
+                image_mask = image_mask.to(self.device)
 
-                loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, masks, mode='validation', loss_type=loss_type)
+                loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, image_mask, mode='validation', loss_type=loss_type)
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -355,9 +357,9 @@ class TrainerEncoder:
         distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
         losses = F.relu(distance_positive - distance_negative + margin)
 
-        return losses.mean()
+        return losses.mean()        
     
-    def _compute_separate_loss(self, real_image, fake_image, diff_image, mask, mode, loss_type):
+    def _compute_separate_loss(self, real_image, fake_image, diff_image, image_mask, mode, loss_type):
         """
         Loss for separate encoder to get fake_features close to real_init_features.
         """
@@ -376,9 +378,59 @@ class TrainerEncoder:
                 fake_features = self.encoder(fake_image)
                 diff_features = self.encoder(diff_image)
 
-                # Magnitudes
-                fake_magnitude = self.magnitude_loss(fake_features)
-                diff_magnitude = self.magnitude_loss(diff_features)
+
+
+
+            # compare feature shape with mask shape
+            assert real_init_features.shape == fake_features.shape == diff_features.shape, "Feature shapes do not match"
+            print(f'Features shape: {fake_features.shape}')
+            print(f'Image mask shape: {image_mask.shape}')
+
+            B, C, H, W = fake_features.shape
+
+            # Downsampling mask to feature shape
+            feature_mask = TF.resize(image_mask, [H, W], interpolation=TF.InterpolationMode.NEAREST)
+            feature_mask = feature_mask.bool()
+
+            print(f'Feature mask shape: {feature_mask.shape}')
+
+            # If the current mask has no valid pixels, continue.
+            if feature_mask.sum() == 0:
+                print(f'No valid pixels in mask')
+                return None, None
+            
+            assert feature_mask.shape == (B, 1, H, W), f"Mask shape is {feature_mask.shape}"
+
+            # Normalize mask to shape Bx1xHxW
+
+
+            # def normalize_shape(tensor_in):
+            #     """Bring tensor from shape BxCxHxW to NxC"""
+            #     return tensor_in.transpose(0, 1).flatten(1).transpose(0, 1)
+
+            # image_mask_B1HW = image_mask_B1HW.float()
+            # image_mask_N1 = normalize_shape(image_mask_B1HW)
+
+
+
+            # Feature shape: BxCxHxW
+            # Mask shape: Bx1xHxW
+
+
+            # apply mask to features to get only valid pixels
+            real_init_features = real_init_features[feature_mask]
+            fake_features = fake_features[feature_mask]
+            diff_features = diff_features[feature_mask]
+
+            assert real_init_features.shape == fake_features.shape == diff_features.shape, "Feature shapes after masking do not match"
+            print(f'Features shape after masking: {fake_features.shape}')
+
+
+
+
+            # Magnitudes
+            fake_magnitude = self.magnitude_loss(fake_features)
+            diff_magnitude = self.magnitude_loss(diff_features)
 
             magnitudes = fake_magnitude #+ diff_magnitude
 
@@ -437,10 +489,10 @@ class TrainerEncoder:
                 fake_features = self.encoder(fake_image)
                 diff_features = self.encoder(diff_image)
 
-                # Magnitudes
-                real_magnitude = self.magnitude_loss(real_features)
-                fake_magnitude = self.magnitude_loss(fake_features)
-                diff_magnitude = self.magnitude_loss(diff_features)
+            # Magnitudes
+            real_magnitude = self.magnitude_loss(real_features)
+            fake_magnitude = self.magnitude_loss(fake_features)
+            diff_magnitude = self.magnitude_loss(diff_features)
 
             magnitudes = real_magnitude + fake_magnitude + diff_magnitude
 
