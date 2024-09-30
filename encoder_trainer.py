@@ -14,60 +14,9 @@ from torch.utils.data import DataLoader, sampler
 from torch.utils.tensorboard import SummaryWriter
 
 from ace_network import Encoder
-from encoder_dataset import RealFakeDataset
+from encoder_dataset_new import RealFakeDataset
 
 _logger = logging.getLogger(__name__)
-
-
-def custom_collate(batch):
-    """
-    Custom collate function to pad images to the same size.
-    """
-    real_images = [item[0] for item in batch]
-    fake_images = [item[1] for item in batch]
-    
-    # Find max dimensions
-    max_height = max([img.shape[1] for img in real_images])
-    max_width = max([img.shape[2] for img in real_images])
-    
-    # Pad images
-    real_images_padded = [F.pad(img, (0, max_width - img.shape[2], 0, max_height - img.shape[1])) for img in real_images]
-    fake_images_padded = [F.pad(img, (0, max_width - img.shape[2], 0, max_height - img.shape[1])) for img in fake_images]
-    
-    return torch.stack(real_images_padded), torch.stack(fake_images_padded)
-
-def custom_collate_with_negatives(batch):
-    """
-    Custom collate function to pad images to the same size and include negative samples.
-    """
-    real_images = [item[0] for item in batch]
-    fake_images = [item[1] for item in batch]
-    
-    # Find max dimensions
-    max_height = max([img.shape[1] for img in real_images + fake_images])
-    max_width = max([img.shape[2] for img in real_images + fake_images])
-    
-    # Pad images
-    def pad_images(images):
-        return [F.pad(img, (0, max_width - img.shape[2], 0, max_height - img.shape[1])) for img in images]
-    
-    real_images_padded = pad_images(real_images)
-    fake_images_padded = pad_images(fake_images)
-
-    # Create negative samples by shuffling fake images
-    negative_images_padded = fake_images_padded.copy()
-    random.shuffle(negative_images_padded)
-
-    # Ensure negatives are different from positives
-    for i in range(len(fake_images_padded)):
-        if torch.all(torch.eq(fake_images_padded[i], negative_images_padded[i])):
-            j = (i + 1) % len(fake_images_padded)  # Choose the next image as negative
-            negative_images_padded[i], negative_images_padded[j] = negative_images_padded[j], negative_images_padded[i]
-    
-    
-    return (torch.stack(real_images_padded), 
-            torch.stack(fake_images_padded), 
-            torch.stack(negative_images_padded))
 
 
 class TensorBoardLogger:
@@ -133,24 +82,24 @@ class TrainerEncoder:
             self.train_dataset,
             batch_size=self.options.batch_size,
             shuffle=True,
-            collate_fn=custom_collate_with_negatives,
         )
-
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=self.options.batch_size,
             shuffle=False,
-            collate_fn=custom_collate_with_negatives,
         )
         
         _logger.info(f"Loaded training and validation datasets")
 
+        # Loss function
+        if self.options.loss_function == 'separate':
+            self._compute_loss = self._compute_separate_loss
+        elif self.options.loss_function == 'combined':
+            self._compute_loss = self._compute_combined_loss
+        else:
+            raise ValueError(f"Invalid loss function: {self.options.loss_function}")
 
         # Optimizer
-        # self.optimizer = Adam(
-        #     filter(lambda p: p.requires_grad, self.encoder.parameters()),
-        #     lr=options.learning_rate,
-        # )
         self.optimizer = AdamW(
             filter(lambda p: p.requires_grad, self.encoder.parameters()),
             lr=self.options.learning_rate,
@@ -173,23 +122,26 @@ class TrainerEncoder:
         config = {
             'output_path': options.output_path,
 
+            'datasets': options.dataset_names,
+            'train_dataset_size': len(self.train_dataset),
+            'val_dataset': options.validation_dataset,
+            'val_dataset_size': len(self.val_dataset),
+
             'learning_rate': options.learning_rate,
             'weight_decay': options.weight_decay,
 
             'num_epochs' : options.num_epochs,
             'batch_size': options.batch_size,
             'gradient_accumulation_samples': options.gradient_accumulation_samples,
-            'validation_frequency': options.validation_frequency,
 
             'use_half': options.use_half,
             'image_height': options.image_height,
             'aug_rotation': options.aug_rotation,
             'aug_scale_min': options.aug_scale_min,
             'aug_scale_max': options.aug_scale_max,
-
+            
+            'loss_function': options.loss_function,
             'contrastive_weights': options.contrastive_weights,
-            'train_dataset_size': len(self.train_dataset),
-            'val_dataset_size': len(self.val_dataset),
         }
 
         self.logger = TensorBoardLogger(
@@ -200,34 +152,29 @@ class TrainerEncoder:
         self.epoch = 0
         self.iteration = 0
         self.training_start = None
-
-        # Validation
-        self.encoder.eval()
-        val_loss, val_loss_dict = self._validate('mse')
-        self.logger.log_validation_epoch(val_loss_dict, self.epoch)
-
-        _logger.info(f'Validation Loss: {val_loss:.6f}')
-
-        self.train()
-        self.save_model(self.options.output_path)
-
+        
 
     def _load_datasets(self):
-        
-        train_dataset = RealFakeDataset(
-            root_dir=self.options.data_path + "/train",
-            augment=True,
-            use_half=self.options.use_half,
-            image_height=self.options.image_height,
-        )
+        datasets = []
+        for dataset_name in self.options.dataset_names:
+            dataset_path = Path(self.options.data_path) / data_set_name
 
-        val_dataset = RealFakeDataset(
-            root_dir=self.options.data_path + "/validation",
-            augment=False,
-            use_half=self.options.use_half,
-            image_height=self.options.image_height,
-        )
+            if dataset_name == self.options.validation_dataset:
+                val_dataset = RealFakeDataset(
+                    root_dir=dataset_path,
+                    augment=False,
+                    use_half=self.options.use_half,
+                    image_height=self.options.image_height,
+                )
+            else:
+                datasets.append(RealFakeDataset(
+                    root_dir=dataset_path,
+                    augment=True,
+                    use_half=self.options.use_half,
+                    image_height=self.options.image_height,
+                ))
 
+        train_dataset = ConcatDataset(datasets)
         return train_dataset, val_dataset
 
     """
@@ -236,15 +183,31 @@ class TrainerEncoder:
     
     def train(self):
 
+        # Validation
+        self.encoder.eval()
+        val_loss, val_loss_dict = self._validate('mse')
+        self.logger.log_validation_epoch(val_loss_dict, self.epoch)
+
+        _logger.info(f'Validation Loss: {val_loss:.6f}')
+
+        best_val_loss = val_loss
+        patience = 2
+        patience_counter = 0
+
+
         _logger.info(f"Starting training ...")
         self.training_start = time.time()
 
 
-        best_val_loss = float('inf')
-
         while self.epoch < self.options.num_epochs:
 
             self.epoch += 1
+
+            if isinstance(self.train_dataset, ConcatDataset):
+                for dataset in self.train_dataset.datasets:
+                    dataset.set_epoch(epoch)
+            else:
+                self.train_dataset.set_epoch(epoch)
 
             loss_type = 'mse'
             # if self.epoch <= self.options.num_epochs // 2:
@@ -260,23 +223,27 @@ class TrainerEncoder:
             val_loss, val_loss_dict = self._validate(loss_type)
             self.logger.log_validation_epoch(val_loss_dict, self.epoch)
 
+            # Adjust learning rate
             self.scheduler.step(val_loss)
-
             current_lr = self.optimizer.param_groups[0]['lr']
             self.logger.writer.add_scalar('learning_rate', current_lr, self.epoch)
 
-            
             _logger.info(f'Epoch [{self.epoch}/{self.options.num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f} (type: {loss_type})')
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 _logger.info(f"Saving best model at epoch {self.epoch}")
                 self.save_model(f"{self.options.output_path.split('.')[0]}_e{self.epoch}.pt")
+                patience_counter = 0
             else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
                 _logger.info(f"Stopping training because validation loss did not improve")
                 break
         
         self.logger.close()
+        return best_val_loss
         
     def _train_epoch(self, loss_type):
 
@@ -292,7 +259,7 @@ class TrainerEncoder:
             fake_images = fake_images.to(self.device)
             diff_images = diff_images.to(self.device)
 
-            loss, loss_dict = self._compute_separate_loss(real_images, fake_images, diff_images, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, mode='training', loss_type=loss_type)
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -342,7 +309,7 @@ class TrainerEncoder:
                 fake_images = fake_images.to(self.device)
                 diff_images = diff_images.to(self.device)
 
-                loss, loss_dict = self._compute_separate_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
+                loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -448,73 +415,73 @@ class TrainerEncoder:
 
             return loss, loss_dict
     
-    # def _compute_combined_loss(self, real_image, fake_image, diff_image, mode, loss_type):
-    #     """
-    #     Contrastive loss function + magnitude loss.
-    #     """
+    def _compute_combined_loss(self, real_image, fake_image, diff_image, mode, loss_type):
+        """
+        Contrastive loss function + magnitude loss.
+        """
 
-    #     assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
+        assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
 
-    #     assert mode in ['training', 'validation']
+        assert mode in ['training', 'validation']
 
-    #     with autocast(enabled=self.options.use_half):
+        with autocast(enabled=self.options.use_half):
 
-    #         with torch.no_grad():
-    #             real_init_features = self.initial_encoder(real_image)
+            with torch.no_grad():
+                real_init_features = self.initial_encoder(real_image)
 
-    #         with torch.no_grad() if mode=='validation' else torch.enable_grad():
+            with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-    #             real_features = self.encoder(real_image)
-    #             fake_features = self.encoder(fake_image)
-    #             diff_features = self.encoder(diff_image)
+                real_features = self.encoder(real_image)
+                fake_features = self.encoder(fake_image)
+                diff_features = self.encoder(diff_image)
 
-    #             # Magnitudes
-    #             real_magnitude = self.magnitude_loss(real_features)
-    #             fake_magnitude = self.magnitude_loss(fake_features)
-    #             diff_magnitude = self.magnitude_loss(diff_features)
+                # Magnitudes
+                real_magnitude = self.magnitude_loss(real_features)
+                fake_magnitude = self.magnitude_loss(fake_features)
+                diff_magnitude = self.magnitude_loss(diff_features)
 
-    #         magnitudes = real_magnitude + fake_magnitude + diff_magnitude
+            magnitudes = real_magnitude + fake_magnitude + diff_magnitude
 
 
-    #         # Cosine loss
-    #         real_vs_fake_cos = self.cosine_loss(real_features, fake_features, target_value=1, margin=0.1)
-    #         fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
-    #         real_vs_init_cos = self.cosine_loss(real_features, real_init_features, target_value=1, margin=0.2)
+            # Cosine loss
+            real_vs_fake_cos = self.cosine_loss(real_features, fake_features, target_value=1, margin=0.1)
+            fake_vs_diff_cos = self.cosine_loss(fake_features, diff_features, target_value=-1, margin=0.3)
+            real_vs_init_cos = self.cosine_loss(real_features, real_init_features, target_value=1, margin=0.2)
 
-    #         # MSE loss
-    #         real_vs_fake_mse = 200* self.mse_loss(real_features, fake_features)
-    #         fake_vs_diff_mse = 200* self.mse_loss(fake_features, diff_features, target_value=1.0)
-    #         real_vs_init_mse = 200* self.mse_loss(real_features, real_init_features)
+            # MSE loss
+            real_vs_fake_mse = 200* self.mse_loss(real_features, fake_features)
+            fake_vs_diff_mse = 200* self.mse_loss(fake_features, diff_features, target_value=1.0)
+            real_vs_init_mse = 200* self.mse_loss(real_features, real_init_features)
 
             
-    #         a, b, c = self.options.contrastive_weights
+            a, b, c = self.options.contrastive_weights
 
-    #         if loss_type == 'mse':
-    #             contrastive_loss = a * real_vs_fake_mse + b * fake_vs_diff_mse + c * real_vs_init_mse
+            if loss_type == 'mse':
+                contrastive_loss = a * real_vs_fake_mse + b * fake_vs_diff_mse + c * real_vs_init_mse
 
-    #         elif loss_type == 'cosine':
-    #             contrastive_loss = a * real_vs_fake_cos + b * fake_vs_diff_cos + c * real_vs_init_cos
+            elif loss_type == 'cosine':
+                contrastive_loss = a * real_vs_fake_cos + b * fake_vs_diff_cos + c * real_vs_init_cos
 
-    #         loss = contrastive_loss + magnitudes
+            loss = contrastive_loss + magnitudes
 
 
-    #         loss_dict = {
-    #             'R-F_cos': real_vs_fake_cos.item(),
-    #             'F-D_cos': fake_vs_diff_cos.item(),
-    #             'R-I_cos': real_vs_init_cos.item(),
+            loss_dict = {
+                'R-F_cos': real_vs_fake_cos.item(),
+                'F-D_cos': fake_vs_diff_cos.item(),
+                'R-I_cos': real_vs_init_cos.item(),
 
-    #             'R-F_mse': real_vs_fake_mse.item(),
-    #             'F-D_mse': fake_vs_diff_mse.item(),
-    #             'R-I_mse': real_vs_init_mse.item(),
+                'R-F_mse': real_vs_fake_mse.item(),
+                'F-D_mse': fake_vs_diff_mse.item(),
+                'R-I_mse': real_vs_init_mse.item(),
 
-    #             '|R|': real_magnitude.item(),
-    #             '|F|': fake_magnitude.item(),
-    #             '|D|': diff_magnitude.item(),
+                '|R|': real_magnitude.item(),
+                '|F|': fake_magnitude.item(),
+                '|D|': diff_magnitude.item(),
 
-    #             'Total': loss.item(),
-    #         }
+                'Total': loss.item(),
+            }
         
-    #     return loss, loss_dict
+        return loss, loss_dict
         
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
@@ -534,17 +501,22 @@ if __name__ == "__main__":
     class Options:
         def __init__(self):
             self.encoder_path = "ace_encoder_pretrained.pt"
-            self.data_path = "/home/johndoe/Documents/data/Transfer Learning/Pantheon"
+            self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
+
+            self.dataset_names = ['Notre Dame', 'Reichstag', 'Brandenburg Gate', 'Pantheon']
+            self.validation_dataset = 'Pantheon'
+
             self.output_path = "output_encoder/fine-tuned_encoder_separate.pt"
             self.experiment_name = 'separate 1'
+
 
             self.learning_rate = 0.0001 # Validate
             self.weight_decay = 0.01    # Validate
 
             self.num_epochs = 8
-            self.batch_size = 2
+            self.batch_size = 4
             self.gradient_accumulation_samples = 40
-            self.validation_frequency = 10
+            # self.validation_frequency = 10
 
             self.use_half = True
             self.image_height = 480
@@ -552,11 +524,59 @@ if __name__ == "__main__":
             self.aug_scale_min = 240/480
             self.aug_scale_max = 960/480
 
+            self.loss_function = 'separate'
             self.contrastive_weights = (0.5, 0.25, 0.25)
 
 
     logging.basicConfig(level=logging.INFO)
 
     options = Options()
-    trainer = TrainerEncoder(options)
+
+
+    def cross_validate(options, learning_rates, weight_decays, gradient_accumulation_samples):
+        """
+        Run configurations through all datasets and return best configuration.
+        """
+
+        for lr in learning_rates:
+            for wd in weight_decays:
+                for ga in gradient_accumulation_samples:
+
+                    options.learning_rate = lr
+                    options.weight_decay = wd
+                    options.gradient_accumulation_samples = ga
+
+                    val_losses = []
+
+                    for val_dataset in options.dataset_names:
+
+                        options.validation_dataset = val_dataset
+                        options.experiment_name = f"lr{lr}_wd{wd}_ga{ga}_{val_dataset}"
+
+                        trainer = TrainerEncoder(options)
+                        val_loss = trainer.train()
+
+                        val_losses.append(val_loss)
     
+                    mean_val_loss[lr][wd][ga] = np.mean(val_losses)
+                    std_val_loss[lr][wd][ga] = np.std(val_losses)
+
+        print(f"Mean validation losses:")
+        print(mean_val_loss)
+
+        print(f"Standard deviation of validation losses:")
+        print(std_val_loss)
+
+        # Return best configuration
+        lr, wd, ga = min(mean_val_loss, key=mean_val_loss.get)
+        print(f"Best configuration: lr={lr}, wd={wd}, ga={ga}")
+                
+        return mean_val_loss, std_val_loss
+
+
+
+    learning_rates = [1e-3, 1e-4, 1e-5]
+    weight_decays = [0.01, 0.001, 0.0001]
+    gradient_accumulation_samples = [20, 40, 80]
+
+    mean_val_loss, std_val_loss = cross_validate(options, learning_rates, weight_decays, gradient_accumulation_samples)
