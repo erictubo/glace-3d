@@ -476,8 +476,12 @@ class CamLocDataset(Dataset):
             xy[0] -= image.shape[2] / 2
             xy[1] -= image.shape[1] / 2
             # reproject
-            xy[0] /= focal_length[0]
-            xy[1] /= focal_length[1]
+            if isinstance(focal_length, float):
+                xy[0] /= focal_length
+                xy[1] /= focal_length
+            else:
+                xy[0] /= focal_length[0]
+                xy[1] /= focal_length[1]
             xy[0] *= depth
             xy[1] *= depth
 
