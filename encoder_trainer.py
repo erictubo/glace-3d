@@ -2,16 +2,18 @@ import logging
 import random
 import time
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam, AdamW
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from torch.cuda.amp import autocast, GradScaler
-from torch.utils.data import DataLoader, sampler
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
+
 
 from ace_network import Encoder
 from encoder_dataset_new import RealFakeDataset
@@ -157,7 +159,7 @@ class TrainerEncoder:
     def _load_datasets(self):
         datasets = []
         for dataset_name in self.options.dataset_names:
-            dataset_path = Path(self.options.data_path) / data_set_name
+            dataset_path = Path(self.options.data_path) / dataset_name
 
             if dataset_name == self.options.validation_dataset:
                 val_dataset = RealFakeDataset(
@@ -205,9 +207,9 @@ class TrainerEncoder:
 
             if isinstance(self.train_dataset, ConcatDataset):
                 for dataset in self.train_dataset.datasets:
-                    dataset.set_epoch(epoch)
+                    dataset.set_epoch(self.epoch)
             else:
-                self.train_dataset.set_epoch(epoch)
+                self.train_dataset.set_epoch(self.epoch)
 
             loss_type = 'mse'
             # if self.epoch <= self.options.num_epochs // 2:
@@ -251,7 +253,7 @@ class TrainerEncoder:
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for real_images, fake_images, diff_images in self.train_loader:
+        for real_images, fake_images, diff_images, masks in self.train_loader:
 
             self.iteration += 1
 
@@ -259,7 +261,7 @@ class TrainerEncoder:
             fake_images = fake_images.to(self.device)
             diff_images = diff_images.to(self.device)
 
-            loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, masks, mode='training', loss_type=loss_type)
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -303,13 +305,13 @@ class TrainerEncoder:
         accumulated_loss_dict = {}
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_images, fake_images, diff_images in self.val_loader:
+            for real_images, fake_images, diff_images, masks in self.val_loader:
 
                 real_images = real_images.to(self.device)
                 fake_images = fake_images.to(self.device)
                 diff_images = diff_images.to(self.device)
 
-                loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, mode='validation', loss_type=loss_type)
+                loss, loss_dict = self._compute_loss(real_images, fake_images, diff_images, masks, mode='validation', loss_type=loss_type)
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -355,7 +357,7 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def _compute_separate_loss(self, real_image, fake_image, diff_image, mode, loss_type):
+    def _compute_separate_loss(self, real_image, fake_image, diff_image, mask, mode, loss_type):
         """
         Loss for separate encoder to get fake_features close to real_init_features.
         """
@@ -415,7 +417,7 @@ class TrainerEncoder:
 
             return loss, loss_dict
     
-    def _compute_combined_loss(self, real_image, fake_image, diff_image, mode, loss_type):
+    def _compute_combined_loss(self, real_image, fake_image, diff_image, mask, mode, loss_type):
         """
         Contrastive loss function + magnitude loss.
         """
@@ -503,20 +505,20 @@ if __name__ == "__main__":
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
-            self.dataset_names = ['Notre Dame', 'Reichstag', 'Brandenburg Gate', 'Pantheon']
-            self.validation_dataset = 'Pantheon'
+            self.dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
+            # self.validation_dataset = 'pantheon'
 
-            self.output_path = "output_encoder/fine-tuned_encoder_separate.pt"
-            self.experiment_name = 'separate 1'
+            # self.output_path = "output_encoder/fine-tuned_encoder_separate.pt"
+            # self.experiment_name = 'separate 1'
 
 
-            self.learning_rate = 0.0001 # Validate
-            self.weight_decay = 0.01    # Validate
+            # self.learning_rate = 0.0001 # Validate
+            # self.weight_decay = 0.01    # Validate
 
             self.num_epochs = 8
             self.batch_size = 4
-            self.gradient_accumulation_samples = 40
-            # self.validation_frequency = 10
+            # self.gradient_accumulation_samples = 40
+            # # self.validation_frequency = 10
 
             self.use_half = True
             self.image_height = 480
@@ -551,7 +553,8 @@ if __name__ == "__main__":
                     for val_dataset in options.dataset_names:
 
                         options.validation_dataset = val_dataset
-                        options.experiment_name = f"lr{lr}_wd{wd}_ga{ga}_{val_dataset}"
+                        options.experiment_name = f"{options.loss_function}_lr{lr}_wd{wd}_ga{ga}_{val_dataset}"
+                        options.output_path = f"output_encoder/{options.experiment_name}.pt"
 
                         trainer = TrainerEncoder(options)
                         val_loss = trainer.train()

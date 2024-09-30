@@ -4,8 +4,8 @@ from pathlib import Path
 import numpy as np
 
 import torch
-from torch.utils.data import Dataset, ConcatDataset
-from torch.utils.data.dataloader import default_collate
+from torch.utils.data import Dataset
+from torch.nn.functional import F
 from torchvision import transforms
 from torchvision.transforms import functional as TF
 from skimage import io
@@ -36,15 +36,15 @@ class RealFakeDataset(Dataset):
         self.use_half = use_half
         self.image_height = image_height
         self.augment = augment
+        self.augment_color = augment_color
         self.aug_rotation = aug_rotation
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
-        self.negative_sample_size = int(negative_sample_fraction * self.__len__())
 
         root_dir = Path(root_dir)
 
-        self.real_rgb_dir = root_dir / 'real images'
-        self.fake_rgb_dir = root_dir / 'fake images'
+        self.real_rgb_dir = root_dir / 'rgb real'
+        self.fake_rgb_dir = root_dir / 'rgb fake'
         self.poses_dir = root_dir / 'poses'
 
         self.real_rgb_files = sorted(self.real_rgb_dir.iterdir())
@@ -55,6 +55,8 @@ class RealFakeDataset(Dataset):
             f'Number of real images ({len(self.real_rgb_files)}), rendered images ({len(self.fake_rgb_files)}), and poses ({len(self.poses_files)}) do not match'
 
         self.image_transform = self._get_image_transform()
+        
+        self.negative_sample_size = int(negative_sample_fraction * self.__len__())
 
         self.epoch = 0
 
@@ -88,17 +90,17 @@ class RealFakeDataset(Dataset):
 
         is_landscape = real_image.shape[1] > real_image.shape[0]
         negative_idx = self._get_negative_sample(idx, pose, is_landscape)
-        other_fake_image = io.imread(self.fake_rgb_files[negative_idx])
+        diff_image = io.imread(self.fake_rgb_files[negative_idx])
 
         assert negative_idx != idx, f"Negative sample {negative_idx} is the same as positive sample {idx}"
 
-        logging.debug(f"Loaded image trio: real {real_image.shape}, fake {fake_image.shape}, other_fake {other_fake_image.shape}")
+        logging.debug(f"Loaded image trio: real {real_image.shape}, fake {fake_image.shape}, diff {diff_image.shape}")
 
-        for img in [real_image, fake_image, other_fake_image]:
+        for img in [real_image, fake_image, diff_image]:
             if len(img.shape) < 3:
                 img = color.gray2rgb(img)
 
-        return real_image, fake_image, other_fake_image
+        return real_image, fake_image, diff_image
 
     def _get_negative_sample(self, idx, pose, is_landscape):
 
@@ -162,40 +164,57 @@ class RealFakeDataset(Dataset):
     
     def _get_single_item(self, idx, image_height, angle):
         try:
-            real_image, fake_image, other_fake_image = self._load_image_trio(idx)
+            real_image, fake_image, diff_image = self._load_image_trio(idx)
         except Exception as e:
             logging.error(f"Error loading image trio at index {idx}: {str(e)}")
             raise
 
         real_image = self._resize_image(real_image, image_height)
         fake_image = self._resize_image(fake_image, image_height)
-        other_fake_image = self._resize_image(other_fake_image, image_height)
+        diff_image = self._resize_image(diff_image, image_height)
 
-        real_image, fake_image, other_fake_image = self._crop_to_smallest([real_image, fake_image, other_fake_image])
+        real_image, fake_image, diff_image = self._crop_to_smallest([real_image, fake_image, diff_image])
 
         image_mask = torch.ones((1, real_image.size[1], real_image.size[0]))
 
         real_image = self.image_transform(real_image)
         fake_image = self.image_transform(fake_image)
-        other_fake_image = self.image_transform(other_fake_image)
+        diff_image = self.image_transform(diff_image)
 
         if self.augment:            
             real_image = self._rotate_image(real_image, angle, 1, 'reflect')
             fake_image = self._rotate_image(fake_image, angle, 1, 'reflect')
-            other_fake_image = self._rotate_image(other_fake_image, angle, 1, 'reflect')
+            diff_image = self._rotate_image(diff_image, angle, 1, 'reflect')
             image_mask = self._rotate_image(image_mask, angle, 1, 'constant')
         
         if self.use_half and torch.cuda.is_available():
             real_image = real_image.half()
             fake_image = fake_image.half()
-            other_fake_image = other_fake_image.half()
+            diff_image = diff_image.half()
         
         image_mask = image_mask > 0
         
-        assert real_image.shape == fake_image.shape == other_fake_image.shape, \
-            f"Shape mismatch: real {real_image.shape}, fake {fake_image.shape}, other_fake {other_fake_image.shape}"
+        assert real_image.shape == fake_image.shape == diff_image.shape == image_mask.shape, \
+            f"Shape mismatch: real {real_image.shape}, fake {fake_image.shape}, diff {diff_image.shape}, mask {image_mask.shape}"
             
-        return real_image, fake_image, other_fake_image, image_mask
+        return real_image, fake_image, diff_image, image_mask
+    
+    def _custom_collate(self, batch):
+        real_images, fake_images, diff_images, masks = zip(*batch)
+
+        # Find max dimensions
+        max_height = max([img.shape[1] for img in real_images])
+        max_width = max([img.shape[2] for img in real_images])
+
+        def pad_tensor(x):
+            return F.pad(x, (0, max_width - x.shape[2], 0, max_height - x.shape[1]))
+
+        real_images_padded = torch.stack([pad_tensor(img) for img in real_images])
+        fake_images_padded = torch.stack([pad_tensor(img) for img in fake_images])
+        diff_images_padded = torch.stack([pad_tensor(img) for img in diff_images])
+        masks_padded = torch.stack([pad_tensor(mask.float()).bool() for mask in masks])
+
+        return real_images_padded, fake_images_padded, diff_images_padded, masks_padded
 
     def __getitem__(self, idx):
         if self.augment:
@@ -209,6 +228,6 @@ class RealFakeDataset(Dataset):
 
         if isinstance(idx, list):
             tensors = [self._get_single_item(i, image_height, angle) for i in idx]
-            return default_collate(tensors)
+            return self._custom_collate(tensors)
         else:
             return self._get_single_item(idx, image_height, angle)
