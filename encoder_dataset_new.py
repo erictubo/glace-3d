@@ -217,7 +217,7 @@ class RealFakeDataset(Dataset):
 
 
 def custom_collate(batch):
-    real_images, fake_images, diff_images, masks = zip(*batch)
+    masks, real_images, fake_images, diff_images, distances = zip(*batch)
 
     # Find max dimensions
     max_height = max([img.shape[1] for img in real_images])
@@ -235,4 +235,4 @@ def custom_collate(batch):
         f"Shape mismatch: real {real_images_padded.shape}, fake {fake_images_padded.shape}, " \
         f"diff {diff_images_padded.shape}, mask {masks_padded.shape}"
 
-    return real_images_padded, fake_images_padded, diff_images_padded, masks_padded
+    return masks_padded, real_images_padded, fake_images_padded, diff_images_padded, distances
