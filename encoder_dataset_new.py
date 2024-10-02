@@ -89,7 +89,7 @@ class RealFakeDataset(Dataset):
         pose = np.loadtxt(self.poses_files[idx])
 
         is_landscape = real_image.shape[1] > real_image.shape[0]
-        negative_idx = self._get_negative_sample(idx, pose, is_landscape)
+        negative_idx, distance = self._get_negative_sample(idx, pose, is_landscape)
         diff_image = io.imread(self.fake_rgb_files[negative_idx])
 
         assert negative_idx != idx, f"Negative sample {negative_idx} is the same as positive sample {idx}"
@@ -100,7 +100,7 @@ class RealFakeDataset(Dataset):
             if len(img.shape) < 3:
                 img = color.gray2rgb(img)
 
-        return real_image, fake_image, diff_image
+        return real_image, fake_image, diff_image, distance
 
     def _get_negative_sample(self, idx, pose, is_landscape):
 
@@ -131,7 +131,7 @@ class RealFakeDataset(Dataset):
             valid_indices = [i for i in range(len(self)) if i != idx]
             return random.choice(valid_indices)
         
-        return farthest_idx
+        return farthest_idx, max_distance
 
     @staticmethod
     def _resize_image(image, target_height):
@@ -164,7 +164,7 @@ class RealFakeDataset(Dataset):
     
     def _get_single_item(self, idx, image_height, angle):
         try:
-            real_image, fake_image, diff_image = self._load_image_trio(idx)
+            real_image, fake_image, diff_image, distance = self._load_image_trio(idx)
         except Exception as e:
             logging.error(f"Error loading image trio at index {idx}: {str(e)}")
             raise
@@ -197,7 +197,7 @@ class RealFakeDataset(Dataset):
         assert real_image.shape == fake_image.shape == diff_image.shape == image_mask.shape, \
             f"Shape mismatch: real {real_image.shape}, fake {fake_image.shape}, diff {diff_image.shape}, mask {image_mask.shape}"
             
-        return real_image, fake_image, diff_image, image_mask
+        return image_mask, real_image, fake_image, diff_image, distance
 
     def __getitem__(self, idx):
         if self.augment:

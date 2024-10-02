@@ -279,7 +279,7 @@ class TrainerEncoder:
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for real_image, fake_image, diff_image, image_mask in self.train_loader:
+        for image_mask, real_image, fake_image, diff_image, distance in self.train_loader:
 
             self.iteration += 1
 
@@ -353,7 +353,7 @@ class TrainerEncoder:
         val_loader = self.get_random_validation_subset(n_samples)
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_image, fake_image, diff_image, image_mask in val_loader:
+            for image_mask, real_image, fake_image, diff_image, distance in val_loader:
                 
                 val_iteration += 1
                 _logger.info(f'{val_iteration} / {len(val_loader)} ...')
@@ -592,7 +592,7 @@ class TrainerEncoder:
 
             # MSE loss
             real_vs_fake_mse = 200* self.mse_loss(real_features_NC, fake_features_NC)
-            fake_vs_diff_mse = 200* - self.mse_loss(fake_features_NC, diff_features_NC) # TODO: make loss non-negative
+            fake_vs_diff_mse = 200* (1 - self.mse_loss(fake_features_NC, diff_features_NC)) # TODO: make loss non-negative
             real_vs_init_mse = 200* self.mse_loss(real_features_NC, real_init_features_NC) # TODO: add margin or remove
 
             
@@ -670,7 +670,7 @@ if __name__ == "__main__":
             self.aug_scale_max = 960/480
 
             self.loss_function = 'combined'
-            self.contrastive_weights = (0.45, 0.35, 0.2)
+            self.contrastive_weights = (0.5, 0.3, 0.2)
 
 
     logging.basicConfig(level=logging.INFO)
