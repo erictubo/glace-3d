@@ -1,5 +1,6 @@
 import logging
 import random
+import numpy as np
 from pathlib import Path
 
 import torch
@@ -27,13 +28,7 @@ class RealFakeDataset(Dataset):
             augment=False,
             use_half=True,
             image_height=480,
-
-            # aug_rotation=15,
-            # aug_scale_min=2 / 3,
-            # aug_scale_max=3 / 2,
-            # aug_black_white=0.1,
-            # aug_color=0.3,
-
+            
             aug_rotation=40,
             aug_scale_min=240/480,
             aug_scale_max=960/480,
@@ -44,7 +39,6 @@ class RealFakeDataset(Dataset):
         ):
 
         self.use_half = use_half
-
         self.image_height = image_height
 
         self.augment = augment
