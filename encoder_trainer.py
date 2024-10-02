@@ -202,11 +202,11 @@ class TrainerEncoder:
     
     def train(self):
 
-        _logger.info(f"Initial validation ...")
+        # _logger.info(f"Initial validation ...")
 
         # Validation
         self.encoder.eval()
-        val_loss, val_loss_dict = self._validate('mse')
+        val_loss, val_loss_dict = self._validate('mse', self.options.epoch_val_limit)
         self.logger.log_validation_epoch(val_loss_dict, self.epoch)
 
         _logger.info(f'Validation Loss: {val_loss:.6f}')
@@ -248,7 +248,7 @@ class TrainerEncoder:
 
             
             self.encoder.eval()
-            val_loss, val_loss_dict = self._validate(loss_type)
+            val_loss, val_loss_dict = self._validate(loss_type, self.options.epoch_val_limit)
             self.logger.log_validation_epoch(val_loss_dict, self.epoch)
 
             # Adjust learning rate
@@ -282,7 +282,6 @@ class TrainerEncoder:
         for real_image, fake_image, diff_image, image_mask in self.train_loader:
 
             self.iteration += 1
-            _logger.info(f'Iteration {self.iteration}')
 
             real_image = real_image.to(self.device)
             fake_image = fake_image.to(self.device)
@@ -313,23 +312,26 @@ class TrainerEncoder:
                 accumulated_loss_dict = {}
 
                 accumulated_loss /= self.options.gradient_accumulation_steps
-                _logger.info(f'Iteration {self.iteration}, Loss: {accumulated_loss:.6f} (type: {loss_type})')
+                _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} Loss: {accumulated_loss:.6f} (type: {loss_type})')
                 accumulated_loss = 0.0
 
                 if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
-                    val_loss, val_loss_dict = self._validate(loss_type)
+                    val_loss, val_loss_dict = self._validate(loss_type, self.options.iter_val_limit)
                     self.logger.log_validation_iteration(val_loss_dict, self.iteration)
-                    _logger.info(f'Iteration {self.iteration}, Val Loss: {val_loss:.6f}')
+                    _logger.info(f'Validation Loss: {val_loss:.6f}')
 
                     # Save model
                     _logger.info(f"Saving model at iteration {self.iteration}")
                     self.save_model(f"{self.options.output_path.split('.')[0]}_i{self.iteration}.pt")
+            
+            else:
+                _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
                         
         return total_loss / len(self.train_loader)
 
     
-    def get_random_validation_subset(self):
-        val_limit = min(self.options.val_limit, len(self.val_dataset))
+    def get_random_validation_subset(self, n_samples):
+        val_limit = min(n_samples, len(self.val_dataset))
         indices = torch.randperm(len(self.val_dataset))[:val_limit]
         subset = torch.utils.data.Subset(self.val_dataset, indices)
         return DataLoader(
@@ -340,19 +342,21 @@ class TrainerEncoder:
         )
 
     
-    def _validate(self, loss_type):
+    def _validate(self, loss_type, n_samples):
+
+        _logger.info(f"Validating on {n_samples} samples ...")
         
         total_loss = 0.0
         accumulated_loss_dict = {}
         val_iteration = 0
 
-        val_loader = self.get_random_validation_subset()
+        val_loader = self.get_random_validation_subset(n_samples)
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
             for real_image, fake_image, diff_image, image_mask in val_loader:
                 
                 val_iteration += 1
-                _logger.info(f'Iteration {val_iteration} / {len(val_loader)}')
+                _logger.info(f'{val_iteration} / {len(val_loader)} ...')
 
                 real_image = real_image.to(self.device)
                 fake_image = fake_image.to(self.device)
@@ -375,13 +379,19 @@ class TrainerEncoder:
     LOSS FUNCTIONS
     """
 
-    def magnitude_loss(self, features, target_value=1.0, margin=0.1):
+    # def magnitude_loss(self, features, target_value=1.0, margin=0.1):
 
-        feature_norms = torch.norm(features, dim=1)
+    #     feature_norms = torch.norm(features, dim=1)
         
-        losses = F.relu(torch.abs(target_value - feature_norms) - margin)
+    #     losses = F.relu(torch.abs(target_value - feature_norms) - margin)
 
-        return losses.mean()
+    #     return losses.mean()
+    
+    def magnitude_loss(self, features, target_value=1.0, margin=0.15):
+
+        magnitude = torch.mean(torch.norm(features, dim=1))
+
+        return F.relu(torch.abs(target_value - magnitude) - margin)
 
 
     def mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0):
@@ -463,7 +473,11 @@ class TrainerEncoder:
         
         N = B*H*W
         assert M <= N, f"Masked size {M} larger than {N} = {B}*{H}*{W}"
-        if M == N: print('M=N so mean feature mask should be equal to 1.0:', feature_mask.mean())
+        if M == N:
+            print('M=N so mean feature mask should be equal to 1.0:')
+            try: print(feature_mask.float().mean())
+            except: print('error in mean calculation')
+        
 
         assert(len(valid_features_list) == len(features_list))
 
@@ -563,6 +577,7 @@ class TrainerEncoder:
 
 
             # Magnitudes
+            real_init_magnitude = self.magnitude_loss(real_init_features)
             real_magnitude = self.magnitude_loss(real_features_NC)
             fake_magnitude = self.magnitude_loss(fake_features_NC)
             diff_magnitude = self.magnitude_loss(diff_features_NC)
@@ -577,8 +592,8 @@ class TrainerEncoder:
 
             # MSE loss
             real_vs_fake_mse = 200* self.mse_loss(real_features_NC, fake_features_NC)
-            fake_vs_diff_mse = 200* - self.mse_loss(fake_features_NC, diff_features_NC)
-            real_vs_init_mse = 200* self.mse_loss(real_features_NC, real_init_features_NC)
+            fake_vs_diff_mse = 200* - self.mse_loss(fake_features_NC, diff_features_NC) # TODO: make loss non-negative
+            real_vs_init_mse = 200* self.mse_loss(real_features_NC, real_init_features_NC) # TODO: add margin or remove
 
             
             a, b, c = self.options.contrastive_weights
@@ -595,12 +610,13 @@ class TrainerEncoder:
             loss_dict = {
                 'R-F_cos': real_vs_fake_cos.item(),
                 'F-D_cos': fake_vs_diff_cos.item(),
-                'R-I_cos': real_vs_init_cos.item(),
+                'R-RI_cos': real_vs_init_cos.item(),
 
                 'R-F_mse': real_vs_fake_mse.item(),
                 'F-D_mse': fake_vs_diff_mse.item(),
-                'R-I_mse': real_vs_init_mse.item(),
-
+                'R-RI_mse': real_vs_init_mse.item(),
+                
+                '|RI|': real_init_magnitude.item(),
                 '|R|': real_magnitude.item(),
                 '|F|': fake_magnitude.item(),
                 '|D|': diff_magnitude.item(),
@@ -631,8 +647,9 @@ if __name__ == "__main__":
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
             self.dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
-            # self.validation_dataset = 'pantheon'
-            self.val_limit = 20
+            self.validation_dataset = 'pantheon'
+            self.iter_val_limit = 20 # number of samples for each validation
+            self.epoch_val_limit = 80 # for epoch validation
 
             # self.output_path = "output_encoder/fine-tuned_encoder_separate.pt"
             # self.experiment_name = 'separate 1'
@@ -653,7 +670,7 @@ if __name__ == "__main__":
             self.aug_scale_max = 960/480
 
             self.loss_function = 'combined'
-            self.contrastive_weights = (0.4, 0.35, 0.25)
+            self.contrastive_weights = (0.45, 0.35, 0.2)
 
 
     logging.basicConfig(level=logging.INFO)
@@ -661,36 +678,37 @@ if __name__ == "__main__":
     options = Options()
 
 
-    def cross_validate():
-        """
-        Run configurations through all datasets and return best configuration.
-        """
+    # def cross_validate():
+    #     """
+    #     Run configurations through all datasets and return best configuration.
+    #     """
 
-        val_losses = []
+        # val_losses = []
 
-        for val_dataset in options.dataset_names:
+        # for val_dataset in options.dataset_names:
 
-            options.validation_dataset = val_dataset
-            options.experiment_name = f"{options.loss_function}_w{options.contrastive_weights}_{val_dataset}"
-            options.output_path = f"output_encoder/{options.experiment_name}.pt"
+        #     options.validation_dataset = val_dataset
+    w1, w2, w3 = options.contrastive_weights
+    options.experiment_name = f"{options.loss_function}_oldmag_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+    options.output_path = f"output_encoder/{options.experiment_name}.pt"
 
-            print(f'Training {options.experiment_name}')
-            trainer = TrainerEncoder(options)
-            val_loss = trainer.train()
+    print(f'Training {options.experiment_name}')
+    trainer = TrainerEncoder(options)
+    val_loss = trainer.train()
 
-            val_losses.append(val_loss)
+    #         val_losses.append(val_loss)
 
-        mean_val_loss = np.mean(val_losses)
-        std_val_loss = np.std(val_losses)
+    #     mean_val_loss = np.mean(val_losses)
+    #     std_val_loss = np.std(val_losses)
 
-        print(f"Mean validation losses:")
-        print(mean_val_loss)
+    #     print(f"Mean validation losses:")
+    #     print(mean_val_loss)
 
-        print(f"Standard deviation of validation losses:")
-        print(std_val_loss)
+    #     print(f"Standard deviation of validation losses:")
+    #     print(std_val_loss)
 
                 
-        return mean_val_loss, std_val_loss
+    #     return mean_val_loss, std_val_loss
 
 
-    mean_val_loss, std_val_loss = cross_validate()
+    # mean_val_loss, std_val_loss = cross_validate()
