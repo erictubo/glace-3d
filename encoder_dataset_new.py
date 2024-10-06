@@ -25,21 +25,28 @@ class RealFakeDataset(Dataset):
             aug_rotation=40,
             aug_scale_min=240/480,
             aug_scale_max=960/480,
-            # aug_brightness=0.4,
-            # aug_contrast=0.4,
-            # aug_saturation=0.3,
-            # aug_hue=0.3,
+            
+            aug_brightness=0.4,
+            aug_contrast=0.4,
+            aug_saturation=0.3,
+            aug_hue=0.3,
 
             negative_sample_fraction=0.1,
         ):
 
-        self.use_half = use_half
-        self.image_height = image_height
         self.augment = augment
         self.augment_color = augment_color
+        self.use_half = use_half
+        self.image_height = image_height
+
         self.aug_rotation = aug_rotation
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
+
+        self.aug_brightness = aug_brightness
+        self.aug_contrast = aug_contrast
+        self.aug_saturation = aug_saturation
+        self.aug_hue = aug_hue
 
         root_dir = Path(root_dir)
 
@@ -54,19 +61,23 @@ class RealFakeDataset(Dataset):
         assert len(self.real_rgb_files) == len(self.fake_rgb_files) == len(self.poses_files), \
             f'Number of real images ({len(self.real_rgb_files)}), rendered images ({len(self.fake_rgb_files)}), and poses ({len(self.poses_files)}) do not match'
 
-        self.image_transform = self._get_image_transform()
+        self.image_transform = self._get_image_transform(normalize=False)
+        self.image_transform_normalized = self._get_image_transform(normalize=True)
         
         self.negative_sample_size = int(negative_sample_fraction * self.__len__())
 
         self.epoch = 0
 
-    def _get_image_transform(self):
+    def _get_image_transform(self, normalize=True):
 
         transforms_list = [
             transforms.Grayscale(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4], std=[0.25]),
         ]
+
+        if normalize:
+            transforms_list.append(
+                transforms.Normalize(mean=[0.4], std=[0.25]))
 
         if self.augment_color:
             transforms_list.insert(0, transforms.ColorJitter(
@@ -155,6 +166,11 @@ class RealFakeDataset(Dataset):
         
         return cropped_images
     
+    def _create_mask_from_background(self, image, background_color=(60, 60, 60), tolerance=2):
+        mask = np.all(np.abs(image - background_color) > tolerance, axis=-1)
+        return torch.from_numpy(mask).float().unsqueeze(0)
+
+    
     @staticmethod
     def _rotate_image(image, angle, order, mode='constant'):
         image = image.permute(1, 2, 0).numpy()
@@ -162,7 +178,7 @@ class RealFakeDataset(Dataset):
         image = torch.from_numpy(image).permute(2, 0, 1).float()
         return image
     
-    def _get_single_item(self, idx, image_height, angle):
+    def _get_single_item(self, idx, image_height, angle=None):
         try:
             real_image, fake_image, diff_image, distance = self._load_image_trio(idx)
         except Exception as e:
@@ -175,13 +191,18 @@ class RealFakeDataset(Dataset):
 
         real_image, fake_image, diff_image = self._crop_to_smallest([real_image, fake_image, diff_image])
 
-        image_mask = torch.ones((1, real_image.size[1], real_image.size[0]))
+        # image_mask = torch.ones((1, real_image.size[1], real_image.size[0]))
 
-        real_image = self.image_transform(real_image)
+        image_mask = self._create_mask_from_background(np.array(fake_image))
+
+        real_image = self.image_transform_normalized(real_image)
         fake_image = self.image_transform(fake_image)
         diff_image = self.image_transform(diff_image)
 
-        if self.augment:            
+        if self.augment:
+            if angle is None:
+                angle = random.uniform(-self.aug_rotation, self.aug_rotation)
+
             real_image = self._rotate_image(real_image, angle, 1, 'reflect')
             fake_image = self._rotate_image(fake_image, angle, 1, 'reflect')
             diff_image = self._rotate_image(diff_image, angle, 1, 'reflect')
@@ -207,13 +228,13 @@ class RealFakeDataset(Dataset):
             scale_factor = 1
 
         image_height = int(self.image_height * scale_factor)
-        angle = random.uniform(-self.aug_rotation, self.aug_rotation)
+        # angle = random.uniform(-self.aug_rotation, self.aug_rotation)
 
         if isinstance(idx, list):
-            tensors = [self._get_single_item(i, image_height, angle) for i in idx]
+            tensors = [self._get_single_item(i, image_height, angle=None) for i in idx]
             return tensors
         else:
-            return self._get_single_item(idx, image_height, angle)
+            return self._get_single_item(idx, image_height, angle=None)
 
 
 def custom_collate(batch):
@@ -239,11 +260,45 @@ def custom_collate(batch):
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
+    #logging.basicConfig(level=logging.DEBUG)
+    import matplotlib.pyplot as plt
+
     data_path = "/home/johndoe/Documents/data/Transfer Learning/"
     dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
 
     for dataset_name in dataset_names:
-        dataset = RealFakeDataset(data_path + dataset_name, augment=True)
+        dataset = RealFakeDataset(data_path + dataset_name, augment=True, augment_color=True)
         
-        dataset.__getitem__(0)
+        # sample 4 random images from the dataset
+        idx = random.sample(range(len(dataset)), 4)
+        batch = dataset[idx]
+
+        fig, ax = plt.subplots(4, 4)
+
+        for i, sample in enumerate(batch):
+            mask, real, fake, diff, distance = sample
+
+            ax[i, 0].imshow(real[0], cmap='gray')
+            ax[i, 1].imshow(fake[0], cmap='gray')
+            ax[i, 2].imshow(diff[0], cmap='gray')
+            ax[i, 3].imshow(mask[0], cmap='gray')
+
+        
+        plt.show()
+
+
+
+        batch = custom_collate(batch)
+
+        # masks, real_images, fake_images, diff_images, distances = batch
+
+        # # 4x4 grid
+        # fig, ax = plt.subplots(4, 4)
+
+        # for i in range(4):
+        #     ax[i, 0].imshow(real_images[i][0], cmap='gray')
+        #     ax[i, 1].imshow(fake_images[i][0], cmap='gray')
+        #     ax[i, 2].imshow(diff_images[i][0], cmap='gray')
+        #     ax[i, 3].imshow(masks[i][0], cmap='gray')
+
+        # plt.show()
