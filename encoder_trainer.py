@@ -490,9 +490,9 @@ class TrainerEncoder:
         for features in features_list:
             assert features.shape == (B, C, H, W), features.shape
 
-
-        feature_mask = TF.resize(image_mask, [H, W], interpolation=TF.InterpolationMode.NEAREST)
-        feature_mask = feature_mask.bool()
+        feature_mask = TF.resize(image_mask, [H, W], interpolation=TF.InterpolationMode.AREA)
+        threshold = 0.5  # Adjust this value as needed
+        feature_mask = feature_mask > threshold
 
         assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
