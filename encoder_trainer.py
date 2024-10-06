@@ -57,7 +57,7 @@ class TrainerEncoder:
 
         if options.output_path.endswith('.pt'):
             options.output_path = options.output_path[:-3]
-            
+
         self.options = options
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -409,6 +409,20 @@ class TrainerEncoder:
         mse = F.mse_loss(features_1, features_2, reduction='none')
 
         losses = F.relu(torch.abs(target_value - mse) - margin)
+
+        return losses.mean()
+    
+    def mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True):
+
+        features_1 = F.normalize(features_1, p=2, dim=1)
+        features_2 = F.normalize(features_2, p=2, dim=1)
+
+        if smooth:
+            mae = F.smooth_l1_loss(features_1, features_2, reduction='none')
+        else:
+            mae = F.l1_loss(features_1, features_2, reduction='none')
+
+        losses = F.relu(torch.abs(target_value - mae) - margin)
 
         return losses.mean()
     
