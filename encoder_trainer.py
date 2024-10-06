@@ -208,6 +208,7 @@ class TrainerEncoder:
         self.encoder.eval()
         val_loss, val_loss_dict = self._validate('mse', self.options.epoch_val_limit)
         self.logger.log_validation_epoch(val_loss_dict, self.epoch)
+        self.logger.log_validation_iteration(val_loss_dict, self.iteration)
 
         _logger.info(f'Validation Loss: {val_loss:.6f}')
 
@@ -261,7 +262,7 @@ class TrainerEncoder:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 _logger.info(f"Saving best model at epoch {self.epoch}")
-                self.save_model(f"{self.options.output_path.split('.')[0]}_e{self.epoch}.pt")
+                self.save_model(f"{self.options.output_path.split('.')[:-1]}_e{self.epoch}.pt")
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -592,7 +593,7 @@ class TrainerEncoder:
 
             # MSE loss
             real_vs_fake_mse = 200* self.mse_loss(real_features_NC, fake_features_NC)
-            fake_vs_diff_mse = 200* (1 - self.mse_loss(fake_features_NC, diff_features_NC)) # TODO: make loss non-negative
+            fake_vs_diff_mse = 1 - 200* self.mse_loss(fake_features_NC, diff_features_NC)
             real_vs_init_mse = 200* self.mse_loss(real_features_NC, real_init_features_NC) # TODO: add margin or remove
 
             
@@ -647,7 +648,7 @@ if __name__ == "__main__":
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
             self.dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
-            self.validation_dataset = 'pantheon'
+            #self.validation_dataset = 'pantheon'
             self.iter_val_limit = 20 # number of samples for each validation
             self.epoch_val_limit = 80 # for epoch validation
 
@@ -658,7 +659,7 @@ if __name__ == "__main__":
             self.learning_rate = 0.0005
             self.weight_decay = 0.01
 
-            self.num_epochs = 8
+            self.num_epochs = 4
             self.batch_size = 4
             self.gradient_accumulation_samples = 20
             self.validation_frequency = 5
@@ -688,8 +689,11 @@ if __name__ == "__main__":
         # for val_dataset in options.dataset_names:
 
         #     options.validation_dataset = val_dataset
+
+    options.validation_dataset = 'brandenburg gate'
+
     w1, w2, w3 = options.contrastive_weights
-    options.experiment_name = f"{options.loss_function}_oldmag_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+    options.experiment_name = f"{options.loss_function}_w{w1}_{w2}_{w3}_{options.validation_dataset}"
     options.output_path = f"output_encoder/{options.experiment_name}.pt"
 
     print(f'Training {options.experiment_name}')
