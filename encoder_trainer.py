@@ -53,8 +53,12 @@ class TrainerEncoder:
     """
 
     def __init__(self, options):
+        options.gradient_accumulation_steps = options.gradient_accumulation_samples // options.batch_size
+
+        if options.output_path.endswith('.pt'):
+            options.output_path = options.output_path[:-3]
+            
         self.options = options
-        self.options.gradient_accumulation_steps = options.gradient_accumulation_samples // options.batch_size
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -204,6 +208,8 @@ class TrainerEncoder:
 
         # _logger.info(f"Initial validation ...")
 
+        self.save_model(f"{self.options.output_path}_e{self.epoch}.pt")
+
         # Validation
         self.encoder.eval()
         val_loss, val_loss_dict = self._validate('mse', self.options.epoch_val_limit)
@@ -262,7 +268,7 @@ class TrainerEncoder:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 _logger.info(f"Saving best model at epoch {self.epoch}")
-                self.save_model(f"{self.options.output_path.split('.')[:-1]}_e{self.epoch}.pt")
+                self.save_model(f"{self.options.output_path}_e{self.epoch}.pt")
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -323,7 +329,7 @@ class TrainerEncoder:
 
                     # Save model
                     _logger.info(f"Saving model at iteration {self.iteration}")
-                    self.save_model(f"{self.options.output_path.split('.')[0]}_i{self.iteration}.pt")
+                    self.save_model(f"{self.options.output_path}_i{self.iteration}.pt")
             
             else:
                 _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
@@ -415,6 +421,40 @@ class TrainerEncoder:
 
         return losses.mean()
     
+    def _diversity_loss(self, features):
+        
+        # Encourage diversity in feature space
+        features = F.normalize(features, dim=1)
+        similarity_matrix = torch.matmul(features, features.t())
+        eye = torch.eye(features.size(0), device=features.device)
+
+        return torch.mean((similarity_matrix - eye) ** 2)
+
+    def _spatial_consistency_loss(self, features, image_mask):
+
+        assert len(features.shape) == 4, features.shape
+        B, C, H, W = features.shape
+
+        mask_B1HW = image_mask
+        mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
+
+        assert mask_BCHW.shape == (B, C, H, W), mask_BCHW.shape
+
+        # Encourage spatial consistency
+        
+        # Compute gradients in x and y directions
+        grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
+        grad_y = features[:, :, 1:, :] - features[:, :, :-1, :]
+
+        # Update mask to exclude border pixels (where gradients are not valid)
+        mask = mask_BCHW[:, :, 1:, :] & mask_BCHW[:, :, :-1, :] & mask_BCHW[:, :, :, 1:] & mask_BCHW[:, :, :, :-1]
+
+        # Mask gradients
+        grad_x = grad_x[mask[:, :, :, 1:]]
+        grad_y = grad_y[mask[:, :, 1:, :]]
+
+        # Compute total variation
+        return torch.mean(torch.abs(grad_x)) + torch.mean(torch.abs(grad_y))
 
     def triplet_loss(self, anchor, positive, negative, margin=0.2):
 
@@ -694,7 +734,7 @@ if __name__ == "__main__":
 
     w1, w2, w3 = options.contrastive_weights
     options.experiment_name = f"{options.loss_function}_w{w1}_{w2}_{w3}_{options.validation_dataset}"
-    options.output_path = f"output_encoder/{options.experiment_name}.pt"
+    options.output_path = f"output_encoder/{options.experiment_name}"
 
     print(f'Training {options.experiment_name}')
     trainer = TrainerEncoder(options)
