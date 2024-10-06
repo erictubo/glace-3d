@@ -236,3 +236,14 @@ def custom_collate(batch):
         f"diff {diff_images_padded.shape}, mask {masks_padded.shape}"
 
     return masks_padded, real_images_padded, fake_images_padded, diff_images_padded, distances
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+    data_path = "/home/johndoe/Documents/data/Transfer Learning/"
+    dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
+
+    for dataset_name in dataset_names:
+        dataset = RealFakeDataset(data_path + dataset_name, augment=True)
+        
+        dataset.__getitem__(0)
