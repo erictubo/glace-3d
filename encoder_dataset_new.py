@@ -244,13 +244,39 @@ def custom_collate(batch):
     max_height = max([img.shape[1] for img in real_images])
     max_width = max([img.shape[2] for img in real_images])
 
-    def pad_tensor(x):
-        return F.pad(x, (0, max_width - x.shape[2], 0, max_height - x.shape[1]))
+    # def pad_tensor(x):
+    #     return F.pad(x, (0, max_width - x.shape[2], 0, max_height - x.shape[1]))
 
-    real_images_padded = torch.stack([pad_tensor(img) for img in real_images])
-    fake_images_padded = torch.stack([pad_tensor(img) for img in fake_images])
-    diff_images_padded = torch.stack([pad_tensor(img) for img in diff_images])
-    masks_padded = torch.stack([pad_tensor(mask.float()).bool() for mask in masks])
+    def pad_tensor(x, l_pad, r_pad, t_pad, b_pad):
+        return F.pad(x, (l_pad, r_pad, t_pad, b_pad))
+
+    padded_images = []
+    for i in range(len(real_images)):
+        h_padding = max_width - real_images[i].shape[2]
+        v_padding = max_height - real_images[i].shape[1]
+        
+        # Generate consistent random padding for this sample
+        l_pad = random.randint(0, h_padding)
+        r_pad = h_padding - l_pad
+        t_pad = random.randint(0, v_padding)
+        b_pad = v_padding - t_pad
+
+        # Apply the same padding to all corresponding images and mask
+        real_padded = pad_tensor(real_images[i], l_pad, r_pad, t_pad, b_pad)
+        fake_padded = pad_tensor(fake_images[i], l_pad, r_pad, t_pad, b_pad)
+        diff_padded = pad_tensor(diff_images[i], l_pad, r_pad, t_pad, b_pad)
+        mask_padded = pad_tensor(masks[i].float(), l_pad, r_pad, t_pad, b_pad).bool()
+
+        padded_images.append((mask_padded, real_padded, fake_padded, diff_padded))
+
+    # Unzip the padded images
+    masks_padded, real_images_padded, fake_images_padded, diff_images_padded = zip(*padded_images)
+
+    # Stack the padded images
+    masks_padded = torch.stack(masks_padded)
+    real_images_padded = torch.stack(real_images_padded)
+    fake_images_padded = torch.stack(fake_images_padded)
+    diff_images_padded = torch.stack(diff_images_padded)
 
     assert real_images_padded.shape == fake_images_padded.shape == diff_images_padded.shape == masks_padded.shape, \
         f"Shape mismatch: real {real_images_padded.shape}, fake {fake_images_padded.shape}, " \
@@ -282,10 +308,8 @@ if __name__ == '__main__':
             ax[i, 1].imshow(fake[0], cmap='gray')
             ax[i, 2].imshow(diff[0], cmap='gray')
             ax[i, 3].imshow(mask[0], cmap='gray')
-
         
         plt.show()
-
 
 
         batch = custom_collate(batch)
