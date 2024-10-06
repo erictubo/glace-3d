@@ -386,7 +386,7 @@ class TrainerEncoder:
     LOSS FUNCTIONS
     """
 
-    # def magnitude_loss(self, features, target_value=1.0, margin=0.1):
+    # def _magnitude_loss(self, features, target_value=1.0, margin=0.1):
 
     #     feature_norms = torch.norm(features, dim=1)
         
@@ -394,14 +394,14 @@ class TrainerEncoder:
 
     #     return losses.mean()
     
-    def magnitude_loss(self, features, target_value=1.0, margin=0.15):
+    def _magnitude_loss(self, features, target_value=1.0, margin=0.15):
 
         magnitude = torch.mean(torch.norm(features, dim=1))
 
         return F.relu(torch.abs(target_value - magnitude) - margin)
 
 
-    def mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0):
+    def _mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0):
 
         features_1 = F.normalize(features_1, p=2, dim=1)
         features_2 = F.normalize(features_2, p=2, dim=1)
@@ -412,7 +412,7 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True):
+    def _mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True):
 
         features_1 = F.normalize(features_1, p=2, dim=1)
         features_2 = F.normalize(features_2, p=2, dim=1)
@@ -427,7 +427,7 @@ class TrainerEncoder:
         return losses.mean()
     
 
-    def cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
+    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
 
         cos_sim = F.cosine_similarity(features_1, features_2, dim=1)
 
@@ -470,7 +470,7 @@ class TrainerEncoder:
         # Compute total variation
         return torch.mean(torch.abs(grad_x)) + torch.mean(torch.abs(grad_y))
 
-    def triplet_loss(self, anchor, positive, negative, margin=0.2):
+    def _triplet_loss(self, anchor, positive, negative, margin=0.2):
 
         distance_positive = F.pairwise_distance(anchor, positive, p=2)
         distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
@@ -564,20 +564,20 @@ class TrainerEncoder:
 
 
             # Magnitudes
-            real_init_magnitude = self.magnitude_loss(real_init_features_NC)
-            fake_magnitude = self.magnitude_loss(fake_features_NC)
-            diff_magnitude = self.magnitude_loss(diff_features_NC)
+            real_init_magnitude = self._magnitude_loss(real_init_features_NC)
+            fake_magnitude = self._magnitude_loss(fake_features_NC)
+            diff_magnitude = self._magnitude_loss(diff_features_NC)
 
             magnitudes = 0.5 * fake_magnitude + 0.5 * diff_magnitude
 
 
             # MSE loss
-            fake_vs_real_init_mse = 200* self.mse_loss(fake_features_NC, real_init_features_NC)
-            # fake_vs_diff_mse = 200* self.mse_loss(fake_features_NC, diff_features_NC, target_value=1.0)
+            fake_vs_real_init_mse = 200* self._mse_loss(fake_features_NC, real_init_features_NC)
+            # fake_vs_diff_mse = 200* self._mse_loss(fake_features_NC, diff_features_NC, target_value=1.0)
 
             # Cosine loss
-            fake_vs_real_init_cos = self.cosine_loss(fake_features_NC, real_init_features_NC, target_value=1, margin=0.2)
-            # fake_vs_diff_cos = self.cosine_loss(fake_features_NC, diff_features_NC, target_value=-1, margin=0.3)
+            fake_vs_real_init_cos = self._cosine_loss(fake_features_NC, real_init_features_NC, target_value=1, margin=0.2)
+            # fake_vs_diff_cos = self._cosine_loss(fake_features_NC, diff_features_NC, target_value=-1, margin=0.3)
 
 
             a, b = 1.0, 0.0
@@ -632,23 +632,23 @@ class TrainerEncoder:
 
 
             # Magnitudes
-            real_init_magnitude = self.magnitude_loss(real_init_features)
-            real_magnitude = self.magnitude_loss(real_features_NC)
-            fake_magnitude = self.magnitude_loss(fake_features_NC)
-            diff_magnitude = self.magnitude_loss(diff_features_NC)
+            real_init_magnitude = self._magnitude_loss(real_init_features)
+            real_magnitude = self._magnitude_loss(real_features_NC)
+            fake_magnitude = self._magnitude_loss(fake_features_NC)
+            diff_magnitude = self._magnitude_loss(diff_features_NC)
 
             magnitudes = real_magnitude + fake_magnitude + diff_magnitude
 
 
             # Cosine loss
-            real_vs_fake_cos = self.cosine_loss(real_features_NC, fake_features_NC, target_value=1, margin=0.1)
-            fake_vs_diff_cos = self.cosine_loss(fake_features_NC, diff_features_NC, target_value=-1, margin=0.3)
-            real_vs_init_cos = self.cosine_loss(real_features_NC, real_init_features_NC, target_value=1, margin=0.2)
+            real_vs_fake_cos = self._cosine_loss(real_features_NC, fake_features_NC, target_value=1, margin=0.1)
+            fake_vs_diff_cos = self._cosine_loss(fake_features_NC, diff_features_NC, target_value=-1, margin=0.3)
+            real_vs_init_cos = self._cosine_loss(real_features_NC, real_init_features_NC, target_value=1, margin=0.2)
 
             # MSE loss
-            real_vs_fake_mse = 200* self.mse_loss(real_features_NC, fake_features_NC)
-            fake_vs_diff_mse = 1 - 200* self.mse_loss(fake_features_NC, diff_features_NC)
-            real_vs_init_mse = 200* self.mse_loss(real_features_NC, real_init_features_NC) # TODO: add margin or remove
+            real_vs_fake_mse = 200* self._mse_loss(real_features_NC, fake_features_NC)
+            fake_vs_diff_mse = 1 - 200* self._mse_loss(fake_features_NC, diff_features_NC)
+            real_vs_init_mse = 200* self._mse_loss(real_features_NC, real_init_features_NC) # TODO: add margin or remove
 
             
             a, b, c = self.options.contrastive_weights
