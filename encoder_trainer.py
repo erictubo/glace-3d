@@ -49,7 +49,7 @@ class TensorBoardLogger:
 
 class TrainerEncoder:
     """
-    Trainer class for fine-tuning the encoder network.
+    Trainer class for fine-tuning the pre-trained encoder network.
     """
 
     def __init__(self, options):
@@ -81,19 +81,22 @@ class TrainerEncoder:
         for param in self.initial_encoder.parameters():
             param.requires_grad = False
 
-        
+
         # Dataset
         self.val_dataset, self.train_dataset, weights = self._load_datasets()
+
+        # Sampler to represent datasets equally
+        sampler = WeightedRandomSampler(
+            weights,
+            num_samples=len(self.train_dataset),
+            replacement=True,
+        )
 
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.options.batch_size,
-            # shuffle=True,
-            sampler=WeightedRandomSampler(
-                weights,
-                num_samples=len(self.train_dataset),
-                replacement=True,
-            ),
+            # shuffle=True, # not compatible with sampler
+            sampler=sampler,
             collate_fn=custom_collate,
         )
         # self.val_loader = DataLoader(
@@ -184,6 +187,7 @@ class TrainerEncoder:
                 train_datasets.append(RealFakeDataset(
                     root_dir=dataset_path,
                     augment=True,
+                    augment_color=True,
                     use_half=self.options.use_half,
                     image_height=self.options.image_height,
                 ))
@@ -437,7 +441,6 @@ class TrainerEncoder:
     
     def _diversity_loss(self, features):
         
-        # Encourage diversity in feature space
         features = F.normalize(features, dim=1)
         similarity_matrix = torch.matmul(features, features.t())
         eye = torch.eye(features.size(0), device=features.device)
@@ -453,8 +456,6 @@ class TrainerEncoder:
         mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
 
         assert mask_BCHW.shape == (B, C, H, W), mask_BCHW.shape
-
-        # Encourage spatial consistency
         
         # Compute gradients in x and y directions
         grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
@@ -489,10 +490,20 @@ class TrainerEncoder:
 
         for features in features_list:
             assert features.shape == (B, C, H, W), features.shape
-
-        feature_mask = TF.resize(image_mask, [H, W], interpolation=TF.InterpolationMode.AREA)
+        
+        feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
         threshold = 0.5  # Adjust this value as needed
-        feature_mask = feature_mask > threshold
+        feature_mask = (feature_mask > threshold).bool()
+
+        # Visualization:
+        # print(image_mask.shape, "->", feature_mask.shape)
+        # import matplotlib.pyplot as plt
+        # fig, ax = plt.subplots(2, 4)
+        # for i in range(B):
+        #     ax[0, i].imshow(image_mask[i][0].cpu(), cmap='gray')
+        #     ax[1, i].imshow(feature_mask[i][0].cpu(), cmap='gray')
+        #     print('...')
+        # plt.show()
 
         assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
@@ -533,7 +544,6 @@ class TrainerEncoder:
             try: print(feature_mask.float().mean())
             except: print('error in mean calculation')
         
-
         assert(len(valid_features_list) == len(features_list))
 
         return valid_features_list
@@ -744,10 +754,11 @@ if __name__ == "__main__":
 
         #     options.validation_dataset = val_dataset
 
-    options.validation_dataset = 'brandenburg gate'
+    options.validation_dataset = 'pantheon'
 
     w1, w2, w3 = options.contrastive_weights
-    options.experiment_name = f"{options.loss_function}_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+    options.experiment_name = f"{options.loss_function}_bpad_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+    options.experiment_name = "test"
     options.output_path = f"output_encoder/{options.experiment_name}"
 
     print(f'Training {options.experiment_name}')
