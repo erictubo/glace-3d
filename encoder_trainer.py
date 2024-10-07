@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 from ace_network import Encoder
-from encoder_dataset_new import RealFakeDataset, custom_collate
+from encoder_dataset import RealFakeDataset, custom_collate
 
 _logger = logging.getLogger(__name__)
 
@@ -290,16 +290,16 @@ class TrainerEncoder:
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for image_mask, real_image, fake_image, diff_image, distance in self.train_loader:
+        for real_image, fake_image, diff_image, fake_mask, diff_mask, distance in self.train_loader:
 
             self.iteration += 1
 
             real_image = real_image.to(self.device)
             fake_image = fake_image.to(self.device)
             diff_image = diff_image.to(self.device)
-            image_mask = image_mask.to(self.device)
+            fake_mask = fake_mask.to(self.device)
 
-            loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, image_mask, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, fake_mask, mode='training', loss_type=loss_type)
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -364,7 +364,7 @@ class TrainerEncoder:
         val_loader = self.get_random_validation_subset(n_samples)
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for image_mask, real_image, fake_image, diff_image, distance in val_loader:
+            for real_image, fake_image, diff_image, fake_mask, diff_mask, distance in val_loader:
                 
                 val_iteration += 1
                 _logger.info(f'{val_iteration} / {len(val_loader)} ...')
@@ -372,9 +372,9 @@ class TrainerEncoder:
                 real_image = real_image.to(self.device)
                 fake_image = fake_image.to(self.device)
                 diff_image = diff_image.to(self.device)
-                image_mask = image_mask.to(self.device)
+                fake_mask = fake_mask.to(self.device)
 
-                loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, image_mask, mode='validation', loss_type=loss_type)
+                loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, fake_mask, mode='validation', loss_type=loss_type)
                 total_loss += loss.item()
 
                 # Accumulate losses
