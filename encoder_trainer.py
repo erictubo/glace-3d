@@ -530,16 +530,13 @@ class TrainerEncoder:
         return losses.mean()
     
     @staticmethod
-    def _mask_features(features_list, image_mask):
+    def _resize_mask_to_features(image_mask, features_shape):
         """
-        Mask features to valid values only.
+        Resize mask to the same size as features.
         """
 
-        B, C, H, W = features_list[0].shape
+        B, C, H, W = features_shape
 
-        for features in features_list:
-            assert features.shape == (B, C, H, W), features.shape
-        
         feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
         threshold = 0.5  # Adjust this value as needed
         feature_mask = (feature_mask > threshold).bool()
@@ -557,6 +554,19 @@ class TrainerEncoder:
         assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
         assert feature_mask.sum() != 0, "Mask is invalid everywhere!"
+
+        return feature_mask
+    
+    @staticmethod
+    def _mask_features(features_list, feature_mask):
+        """
+        Mask features to valid values only.
+        """
+
+        B, C, H, W = features_list[0].shape
+
+        for features in features_list:
+            assert features.shape == (B, C, H, W), features.shape
 
         def normalize_shape(tensor_in):
             """Bring tensor from shape BxCxHxW to NxC"""
@@ -617,9 +627,10 @@ class TrainerEncoder:
                 fake_features = self.encoder(fake_image)
                 diff_features = self.encoder(diff_image)
 
+            feature_mask = self._resize_mask_to_features(image_mask, real_init_features.shape)
 
             # Mask features
-            real_init_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, fake_features, diff_features], image_mask)
+            real_init_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, fake_features, diff_features], feature_mask)
 
 
             # Magnitudes
@@ -685,19 +696,11 @@ class TrainerEncoder:
                 fake_features = self.encoder(fake_image)
                 diff_features = self.encoder(diff_image)
 
-            # Diversity
-            real_init_div = self._diversity_loss(real_init_features, image_mask)
-            real_div = self._diversity_loss(real_init_features, image_mask)
-            fake_div = self._diversity_loss(fake_features, image_mask)
 
-            # Spatial consistency
-            real_init_con = self._spatial_consistency_loss(real_init_features, image_mask)
-            real_con = self._spatial_consistency_loss(real_init_features, image_mask)
-            fake_con = self._spatial_consistency_loss(fake_features, image_mask)
-
+            feature_mask = self._resize_mask_to_features(image_mask, real_init_features.shape)
 
             # Mask features
-            real_init_features_NC, real_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, real_features, fake_features, diff_features], image_mask)
+            real_init_features_NC, real_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, real_features, fake_features, diff_features], feature_mask)
 
 
             # Magnitudes
@@ -729,6 +732,17 @@ class TrainerEncoder:
                 contrastive_loss = a * real_vs_fake_cos + b * fake_vs_diff_cos + c * real_vs_init_cos
 
             loss = contrastive_loss + magnitudes
+
+
+            # Diversity
+            real_init_div = self._diversity_loss(real_init_features, feature_mask)
+            real_div = self._diversity_loss(real_init_features, feature_mask)
+            fake_div = self._diversity_loss(fake_features, feature_mask)
+
+            # Spatial consistency
+            real_init_con = self._spatial_consistency_loss(real_init_features, feature_mask)
+            real_con = self._spatial_consistency_loss(real_init_features, feature_mask)
+            fake_con = self._spatial_consistency_loss(fake_features, feature_mask)
 
 
             loss_dict = {
