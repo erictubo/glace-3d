@@ -299,30 +299,29 @@ if __name__ == '__main__':
         idx = random.sample(range(len(dataset)), 4)
         batch = dataset[idx]
 
-        fig, ax = plt.subplots(4, 4)
+        # fig, ax = plt.subplots(4, 4)
 
-        for i, sample in enumerate(batch):
-            mask, real, fake, diff, distance = sample
+        # for i, sample in enumerate(batch):
+        #     mask, real, fake, diff, distance = sample
 
-            ax[i, 0].imshow(real[0], cmap='gray')
-            ax[i, 1].imshow(fake[0], cmap='gray')
-            ax[i, 2].imshow(diff[0], cmap='gray')
-            ax[i, 3].imshow(mask[0], cmap='gray')
+        #     ax[i, 0].imshow(real[0], cmap='gray')
+        #     ax[i, 1].imshow(fake[0], cmap='gray')
+        #     ax[i, 2].imshow(diff[0], cmap='gray')
+        #     ax[i, 3].imshow(mask[0], cmap='gray')
         
-        plt.show()
+        # plt.show()
 
 
         batch = custom_collate(batch)
 
-        # masks, real_images, fake_images, diff_images, distances = batch
+        masks, real_images, fake_images, diff_images, distances = batch
 
-        # # 4x4 grid
-        # fig, ax = plt.subplots(4, 4)
+        fig, ax = plt.subplots(4, 4)
 
-        # for i in range(4):
-        #     ax[i, 0].imshow(real_images[i][0], cmap='gray')
-        #     ax[i, 1].imshow(fake_images[i][0], cmap='gray')
-        #     ax[i, 2].imshow(diff_images[i][0], cmap='gray')
-        #     ax[i, 3].imshow(masks[i][0], cmap='gray')
+        for i in range(4):
+            ax[i, 0].imshow(real_images[i][0], cmap='gray')
+            ax[i, 1].imshow(fake_images[i][0], cmap='gray')
+            ax[i, 2].imshow(diff_images[i][0], cmap='gray')
+            ax[i, 3].imshow(masks[i][0], cmap='gray')
 
-        # plt.show()
+        plt.show()
