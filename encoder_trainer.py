@@ -400,15 +400,15 @@ class TrainerEncoder:
     
     def _magnitude_loss(self, features, target_value=1.0, margin=0.15):
 
-        magnitude = torch.mean(torch.norm(features, dim=1))
+        magnitude = torch.mean(torch.norm(features, p=2, dim=1))
 
         return F.relu(torch.abs(target_value - magnitude) - margin)
 
 
-    def _mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0):
+    def _mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0, p=1):
 
-        features_1 = F.normalize(features_1, p=2, dim=1)
-        features_2 = F.normalize(features_2, p=2, dim=1)
+        features_1 = F.normalize(features_1, p=p, dim=1)
+        features_2 = F.normalize(features_2, p=p, dim=1)
 
         mse = F.mse_loss(features_1, features_2, reduction='none')
 
@@ -416,10 +416,10 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def _mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True):
+    def _mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True, p=1):
 
-        features_1 = F.normalize(features_1, p=2, dim=1)
-        features_2 = F.normalize(features_2, p=2, dim=1)
+        features_1 = F.normalize(features_1, p=p, dim=1)
+        features_2 = F.normalize(features_2, p=p, dim=1)
 
         if smooth:
             mae = F.smooth_l1_loss(features_1, features_2, reduction='none')
@@ -430,7 +430,6 @@ class TrainerEncoder:
 
         return losses.mean()
     
-
     def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
 
         cos_sim = F.cosine_similarity(features_1, features_2, dim=1)
@@ -439,13 +438,63 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def _diversity_loss(self, features):
-        
-        features = F.normalize(features, dim=1)
-        similarity_matrix = torch.matmul(features, features.t())
-        eye = torch.eye(features.size(0), device=features.device)
+    def _diversity_loss(self, features, image_mask):
 
-        return torch.mean((similarity_matrix - eye) ** 2)
+        B, C, H, W = features.shape
+        mask_BCHW = image_mask.expand(-1, C, -1, -1)
+        
+        # Mask and reshape features
+        features_masked = features[mask_BCHW].view(B, C, -1)
+        
+        # Normalize features
+        features_norm = F.normalize(features_masked, p=2, dim=1)
+        
+        # Compute similarity matrix
+        similarity_matrix = torch.bmm(features_norm, features_norm.transpose(1, 2))
+        
+        # Compute diversity loss
+        eye = torch.eye(C, device=features.device).unsqueeze(0).expand(B, -1, -1)
+        diversity_loss = torch.mean((similarity_matrix - eye) ** 2)
+
+        # Equal weights for all samples in batch
+        # loss_per_sample = (similarity_matrix - eye) ** 2
+
+        # # Compute mean loss per sample, accounting for the number of valid elements
+        # valid_elements = mask_BCHW.sum(dim=(1, 2, 3))
+        # diversity_loss = (loss_per_sample.sum(dim=(1, 2)) / (valid_elements * C)).mean()
+
+        return diversity_loss
+
+        # assert len(features.shape) == 4, features.shape
+        # B, C, H, W = features.shape
+
+        # mask_B1HW = image_mask
+        # mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
+
+        # # separate similarity matrix per sample in batch (B)
+        # eye = torch.eye(C, device=features.device)
+        # diversity_loss = 0
+
+        # for b in range(B):
+        #     features_b = features[b]
+        #     mask_b = mask_BCHW[b]
+
+        #     assert features_b.shape == (C, H, W), features_b.shape
+        #     assert mask_b.shape == (C, H, W), mask_b.shape
+
+        #     # Mask features
+        #     features_b = features_b[mask_b]
+
+        #     # Compute similarity matrix
+        #     features_b = F.normalize(features_b, p=2, dim=0)
+        #     similarity_matrix = torch.matmul(features_b.view(C, -1).t(), features_b.view(C, -1))
+
+        #     assert similarity_matrix.shape == (C, C), similarity_matrix.shape
+
+        #     # Compute diversity loss
+        #     diversity_loss += torch.mean((similarity_matrix - eye) ** 2)
+
+        # return torch.mean((similarity_matrix - eye) ** 2)
 
     def _spatial_consistency_loss(self, features, image_mask):
 
@@ -636,6 +685,16 @@ class TrainerEncoder:
                 fake_features = self.encoder(fake_image)
                 diff_features = self.encoder(diff_image)
 
+            # Diversity
+            real_init_div = self._diversity_loss(real_init_features, image_mask)
+            real_div = self._diversity_loss(real_init_features, image_mask)
+            fake_div = self._diversity_loss(fake_features, image_mask)
+
+            # Spatial consistency
+            real_init_con = self._spatial_consistency_loss(real_init_features, image_mask)
+            real_con = self._spatial_consistency_loss(real_init_features, image_mask)
+            fake_con = self._spatial_consistency_loss(fake_features, image_mask)
+
 
             # Mask features
             real_init_features_NC, real_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, real_features, fake_features, diff_features], image_mask)
@@ -685,6 +744,14 @@ class TrainerEncoder:
                 '|R|': real_magnitude.item(),
                 '|F|': fake_magnitude.item(),
                 '|D|': diff_magnitude.item(),
+
+                'RI_div': real_init_div.item(),
+                'R_div': real_div.item(),
+                'F_div': fake_div.item(),
+
+                'RI_cons': real_init_con.item(),
+                'R_cons': real_con.item(),
+                'F_cons': fake_con.item(),
 
                 'Total': loss.item(),
             }
