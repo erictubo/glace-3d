@@ -89,7 +89,7 @@ class TrainerEncoder:
         sampler = WeightedRandomSampler(
             weights,
             num_samples=len(self.train_dataset),
-            replacement=True,
+            replacement=True, # can repeat samples
         )
 
         self.train_loader = DataLoader(
@@ -127,8 +127,8 @@ class TrainerEncoder:
         self.scheduler = LinearLR(
             self.optimizer,
             start_factor=1.0,
-            end_factor=0.1,
-            total_iters=self.options.num_epochs,
+            end_factor=0.2,
+            total_iters=self.options.num_epochs * int(len(self.train_dataset) / self.options.gradient_accumulation_steps),
         )
 
         # Gradient scaler
@@ -216,7 +216,7 @@ class TrainerEncoder:
 
         # Validation
         self.encoder.eval()
-        val_loss, val_loss_dict = self._validate('mse', self.options.epoch_val_limit)
+        val_loss, val_loss_dict = self._validate(self.options.epoch_val_limit)
         self.logger.log_validation_epoch(val_loss_dict, self.epoch)
         self.logger.log_validation_iteration(val_loss_dict, self.iteration)
 
@@ -248,26 +248,16 @@ class TrainerEncoder:
             else:
                 self.val_dataset.set_epoch(self.epoch)
 
-            loss_type = 'mse'
-            # if self.epoch <= self.options.num_epochs // 2:
-            #     loss_type = 'mse'
-            # else:
-            #     loss_type = 'cosine'
 
             self.encoder.train()
-            train_loss = self._train_epoch(loss_type)
+            train_loss = self._train_epoch()
 
             
             self.encoder.eval()
-            val_loss, val_loss_dict = self._validate(loss_type, self.options.epoch_val_limit)
+            val_loss, val_loss_dict = self._validate(self.options.epoch_val_limit)
             self.logger.log_validation_epoch(val_loss_dict, self.epoch)
 
-            # Adjust learning rate
-            self.scheduler.step(val_loss)
-            current_lr = self.optimizer.param_groups[0]['lr']
-            self.logger.writer.add_scalar('learning_rate', current_lr, self.epoch)
-
-            _logger.info(f'Epoch [{self.epoch}/{self.options.num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f} (type: {loss_type})')
+            _logger.info(f'Epoch [{self.epoch}/{self.options.num_epochs}], Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -284,22 +274,24 @@ class TrainerEncoder:
         self.logger.close()
         return best_val_loss
         
-    def _train_epoch(self, loss_type):
+    def _train_epoch(self):
 
         total_loss = 0.0
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for real_image, fake_image, diff_image, fake_mask, diff_mask, distance in self.train_loader:
+        for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance in self.train_loader:
 
             self.iteration += 1
 
-            real_image = real_image.to(self.device)
-            fake_image = fake_image.to(self.device)
-            diff_image = diff_image.to(self.device)
-            fake_mask = fake_mask.to(self.device)
+            real_image_1 = real_image_1.to(self.device)
+            real_image_2 = real_image_2.to(self.device)
+            fake_image_1 = fake_image_1.to(self.device)
+            fake_image_2 = fake_image_2.to(self.device)
+            mask_1 = mask_1.to(self.device)
+            mask_2 = mask_2.to(self.device)
 
-            loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, fake_mask, mode='training', loss_type=loss_type)
+            loss, loss_dict = self._compute_loss(real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode='training')
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -323,17 +315,22 @@ class TrainerEncoder:
                 accumulated_loss_dict = {}
 
                 accumulated_loss /= self.options.gradient_accumulation_steps
-                _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} Loss: {accumulated_loss:.6f} (type: {loss_type})')
+                _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} Loss: {accumulated_loss:.6f}')
                 accumulated_loss = 0.0
 
                 if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
-                    val_loss, val_loss_dict = self._validate(loss_type, self.options.iter_val_limit)
+                    val_loss, val_loss_dict = self._validate(self.options.iter_val_limit)
                     self.logger.log_validation_iteration(val_loss_dict, self.iteration)
                     _logger.info(f'Validation Loss: {val_loss:.6f}')
 
                     # Save model
                     _logger.info(f"Saving model at iteration {self.iteration}")
                     self.save_model(f"{self.options.output_path}_i{self.iteration}.pt")
+                
+                # Adjust learning rate
+                self.scheduler.step()
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.logger.writer.add_scalar('learning_rate', current_lr, self.iteration)
             
             else:
                 _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
@@ -353,7 +350,7 @@ class TrainerEncoder:
         )
 
     
-    def _validate(self, loss_type, n_samples):
+    def _validate(self, n_samples):
 
         _logger.info(f"Validating on {n_samples} samples ...")
         
@@ -364,17 +361,19 @@ class TrainerEncoder:
         val_loader = self.get_random_validation_subset(n_samples)
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_image, fake_image, diff_image, fake_mask, diff_mask, distance in val_loader:
+            for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance in val_loader:
                 
                 val_iteration += 1
                 _logger.info(f'{val_iteration} / {len(val_loader)} ...')
 
-                real_image = real_image.to(self.device)
-                fake_image = fake_image.to(self.device)
-                diff_image = diff_image.to(self.device)
-                fake_mask = fake_mask.to(self.device)
+                real_image_1 = real_image_1.to(self.device)
+                real_image_2 = real_image_2.to(self.device)
+                fake_image_1 = fake_image_1.to(self.device)
+                fake_image_2 = fake_image_2.to(self.device)
+                mask_1 = mask_1.to(self.device)
+                mask_2 = mask_2.to(self.device)
 
-                loss, loss_dict = self._compute_loss(real_image, fake_image, diff_image, fake_mask, mode='validation', loss_type=loss_type)
+                loss, loss_dict = self._compute_loss(real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode='validation')
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -393,7 +392,6 @@ class TrainerEncoder:
     # def _magnitude_loss(self, features, target_value=1.0, margin=0.1):
 
     #     feature_norms = torch.norm(features, dim=1)
-        
     #     losses = F.relu(torch.abs(target_value - feature_norms) - margin)
 
     #     return losses.mean()
@@ -438,13 +436,17 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def _diversity_loss(self, features, image_mask):
-
+    def _diversity_loss(self, features, feature_mask):
         B, C, H, W = features.shape
-        mask_BCHW = image_mask.expand(-1, C, -1, -1)
         
-        # Mask and reshape features
-        features_masked = features[mask_BCHW].view(B, C, -1)
+        # Reshape features
+        features_reshaped = features.view(B, C, -1)  # Shape: (B, C, H*W)
+        
+        # Reshape mask_1
+        mask_reshaped = feature_mask.view(B, 1, -1)  # Shape: (B, 1, H*W)
+        
+        # Apply mask_1
+        features_masked = features_reshaped * mask_reshaped  # Broadcasting the mask_1
         
         # Normalize features
         features_norm = F.normalize(features_masked, p=2, dim=1)
@@ -456,52 +458,14 @@ class TrainerEncoder:
         eye = torch.eye(C, device=features.device).unsqueeze(0).expand(B, -1, -1)
         diversity_loss = torch.mean((similarity_matrix - eye) ** 2)
 
-        # Equal weights for all samples in batch
-        # loss_per_sample = (similarity_matrix - eye) ** 2
-
-        # # Compute mean loss per sample, accounting for the number of valid elements
-        # valid_elements = mask_BCHW.sum(dim=(1, 2, 3))
-        # diversity_loss = (loss_per_sample.sum(dim=(1, 2)) / (valid_elements * C)).mean()
-
         return diversity_loss
 
-        # assert len(features.shape) == 4, features.shape
-        # B, C, H, W = features.shape
-
-        # mask_B1HW = image_mask
-        # mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
-
-        # # separate similarity matrix per sample in batch (B)
-        # eye = torch.eye(C, device=features.device)
-        # diversity_loss = 0
-
-        # for b in range(B):
-        #     features_b = features[b]
-        #     mask_b = mask_BCHW[b]
-
-        #     assert features_b.shape == (C, H, W), features_b.shape
-        #     assert mask_b.shape == (C, H, W), mask_b.shape
-
-        #     # Mask features
-        #     features_b = features_b[mask_b]
-
-        #     # Compute similarity matrix
-        #     features_b = F.normalize(features_b, p=2, dim=0)
-        #     similarity_matrix = torch.matmul(features_b.view(C, -1).t(), features_b.view(C, -1))
-
-        #     assert similarity_matrix.shape == (C, C), similarity_matrix.shape
-
-        #     # Compute diversity loss
-        #     diversity_loss += torch.mean((similarity_matrix - eye) ** 2)
-
-        # return torch.mean((similarity_matrix - eye) ** 2)
-
-    def _spatial_consistency_loss(self, features, image_mask):
+    def _spatial_consistency_loss(self, features, feature_mask):
 
         assert len(features.shape) == 4, features.shape
         B, C, H, W = features.shape
 
-        mask_B1HW = image_mask
+        mask_B1HW = feature_mask
         mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
 
         assert mask_BCHW.shape == (B, C, H, W), mask_BCHW.shape
@@ -510,15 +474,16 @@ class TrainerEncoder:
         grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
         grad_y = features[:, :, 1:, :] - features[:, :, :-1, :]
 
-        # Update mask to exclude border pixels (where gradients are not valid)
-        mask = mask_BCHW[:, :, 1:, :] & mask_BCHW[:, :, :-1, :] & mask_BCHW[:, :, :, 1:] & mask_BCHW[:, :, :, :-1]
+        # Update mask_1 to exclude border pixels (where gradients are not valid)
+        mask_x = mask_BCHW[:, :, :, 1:] & mask_BCHW[:, :, :, :-1]
+        mask_y = mask_BCHW[:, :, 1:, :] & mask_BCHW[:, :, :-1, :]
 
-        # Mask gradients
-        grad_x = grad_x[mask[:, :, :, 1:]]
-        grad_y = grad_y[mask[:, :, 1:, :]]
+        # mask_1 gradients
+        grad_x_masked = grad_x[mask_x]
+        grad_y_masked = grad_y[mask_y]
 
         # Compute total variation
-        return torch.mean(torch.abs(grad_x)) + torch.mean(torch.abs(grad_y))
+        return torch.mean(torch.abs(grad_x_masked)) + torch.mean(torch.abs(grad_y_masked))
 
     def _triplet_loss(self, anchor, positive, negative, margin=0.2):
 
@@ -532,7 +497,7 @@ class TrainerEncoder:
     @staticmethod
     def _resize_mask_to_features(image_mask, features_shape):
         """
-        Resize mask to the same size as features.
+        Resize mask_1 to the same size as features.
         """
 
         B, C, H, W = features_shape
@@ -541,7 +506,7 @@ class TrainerEncoder:
         threshold = 0.5  # Adjust this value as needed
         feature_mask = (feature_mask > threshold).bool()
 
-        # Visualization:
+        # # Visualization:
         # print(image_mask.shape, "->", feature_mask.shape)
         # import matplotlib.pyplot as plt
         # fig, ax = plt.subplots(2, 4)
@@ -553,14 +518,14 @@ class TrainerEncoder:
 
         assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
-        assert feature_mask.sum() != 0, "Mask is invalid everywhere!"
+        assert feature_mask.sum() != 0, "mask_1 is invalid everywhere!"
 
         return feature_mask
     
     @staticmethod
     def _mask_features(features_list, feature_mask):
         """
-        Mask features to valid values only.
+        mask_1 features to valid values only.
         """
 
         B, C, H, W = features_list[0].shape
@@ -599,173 +564,173 @@ class TrainerEncoder:
         N = B*H*W
         assert M <= N, f"Masked size {M} larger than {N} = {B}*{H}*{W}"
         if M == N:
-            print('M=N so mean feature mask should be equal to 1.0:')
+            print('M=N so mean feature mask_1 should be equal to 1.0:')
             try: print(feature_mask.float().mean())
             except: print('error in mean calculation')
         
         assert(len(valid_features_list) == len(features_list))
 
-        return valid_features_list
+        return valid_features_list, M
 
 
-    def _compute_separate_loss(self, real_image, fake_image, diff_image, image_mask, mode, loss_type):
+    def _compute_separate_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode):
         """
         Loss for separate encoder to get fake_features close to real_init_features.
         """
 
-        # assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
+        assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
         assert mode in ['training', 'validation']
 
         with autocast(enabled=self.options.use_half):
 
             with torch.no_grad():
-                real_init_features = self.initial_encoder(real_image)
+                real_init_features_1 = self.initial_encoder(real_image_1)
+                real_init_features_2 = self.initial_encoder(real_image_2)
 
             with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-                fake_features = self.encoder(fake_image)
-                diff_features = self.encoder(diff_image)
-
-            feature_mask = self._resize_mask_to_features(image_mask, real_init_features.shape)
-
-            # Mask features
-            real_init_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, fake_features, diff_features], feature_mask)
+                fake_features_1 = self.encoder(fake_image_1)
+                fake_features_2 = self.encoder(fake_image_2)
 
 
-            # Magnitudes
-            real_init_magnitude = self._magnitude_loss(real_init_features_NC)
-            fake_magnitude = self._magnitude_loss(fake_features_NC)
-            diff_magnitude = self._magnitude_loss(diff_features_NC)
+            # MASKING
+            mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
+            mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
+            mask_combined = torch.logical_and(mask_1, mask_2)
 
-            magnitudes = 0.5 * fake_magnitude + 0.5 * diff_magnitude
+            (real_init_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, fake_features_1], mask_1)
+            (real_init_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, fake_features_2], mask_2)
 
-
-            # MSE loss
-            fake_vs_real_init_mse = 200* self._mse_loss(fake_features_NC, real_init_features_NC)
-            # fake_vs_diff_mse = 200* self._mse_loss(fake_features_NC, diff_features_NC, target_value=1.0)
-
-            # Cosine loss
-            fake_vs_real_init_cos = self._cosine_loss(fake_features_NC, real_init_features_NC, target_value=1, margin=0.2)
-            # fake_vs_diff_cos = self._cosine_loss(fake_features_NC, diff_features_NC, target_value=-1, margin=0.3)
+            (real_init_features_1_OC, fake_features_1_OC, real_init_features_2_OC, fake_features_2_OC), O = \
+                self._mask_features([real_init_features_1, fake_features_1, real_init_features_2, fake_features_2], mask_combined)
 
 
-            a, b = 1.0, 0.0
+            # MAGNITUDE LOSS
+            magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
+            magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
+            magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
+
+            magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
+            magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
+            magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
+
+            magnitude = magnitude_fake
+
+
+            # COSINE LOSS
+
+            # Minimize
+            cosine_fake_1_vs_real_1_init = self._cosine_loss(fake_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.1)
+            cosine_fake_2_vs_real_2_init = self._cosine_loss(fake_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.1)
+            cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N)
+
+            # Maximize
+            cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
+
+            # Track
+            cosine_real_1_init_vs_real_2_init = self._cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
+
+            # IDEA: anchor fake difference to real_init difference
+
+
+            a, b = self.options.contrastive_weights
             
-            if loss_type == 'mse':
-                contrastive_loss = a * fake_vs_real_init_mse # + b * fake_vs_diff_mse
-            elif loss_type == 'cosine':
-                contrastive_loss = a * fake_vs_real_init_cos # + b * fake_vs_diff_cos
-            
-            loss = contrastive_loss + magnitudes
+            loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
+
+            loss += magnitude
 
 
             loss_dict = {
-                'F-I_cos': fake_vs_real_init_cos.item(),
-                # 'F-D_cos': fake_vs_diff_cos.item(),
+                'F-Ri_cos': cosine_fake_vs_real_init.item(),
+                'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
+                'R1i-R2i_cos': cosine_real_1_init_vs_real_2_init.item(),
 
-                'F-I_mse': fake_vs_real_init_mse.item(),
-                # 'F-D_mse': fake_vs_diff_mse.item(),
-
-                '|F|': fake_magnitude.item(),
-                # '|D|': diff_magnitude.item(),
-                '|RI|': real_init_magnitude.item(),
+                '|F|': magnitude_fake.item(),
+                '|Ri|': magnitude_real_init.item(),
 
                 'Total': loss.item(),
             }
 
             return loss, loss_dict
     
-    def _compute_combined_loss(self, real_image, fake_image, diff_image, image_mask, mode, loss_type):
+    def _compute_combined_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode):
         """
         Contrastive loss function + magnitude loss.
         """
 
-        assert not torch.all(torch.eq(fake_image, diff_image)), "Negative samples are the same as positive samples"
+        assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
         assert mode in ['training', 'validation']
 
         with autocast(enabled=self.options.use_half):
 
             with torch.no_grad():
-                real_init_features = self.initial_encoder(real_image)
+                real_init_features_1 = self.initial_encoder(real_image_1)
+                real_init_features_2 = self.initial_encoder(real_image_2)
 
             with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-                real_features = self.encoder(real_image)
-                fake_features = self.encoder(fake_image)
-                diff_features = self.encoder(diff_image)
+                real_features_1 = self.encoder(real_image_1)
+                real_features_2 = self.encoder(real_image_2)
+                fake_features_1 = self.encoder(fake_image_1)
+                fake_features_2 = self.encoder(fake_image_2)
 
+            # MASKING
+            mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
+            mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
+            mask_combined = torch.logical_and(mask_1, mask_2)
 
-            feature_mask = self._resize_mask_to_features(image_mask, real_init_features.shape)
+            (real_init_features_1_MC, real_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, real_features_1, fake_features_1], mask_1)
+            (real_init_features_2_NC, real_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, real_features_2, fake_features_2], mask_2)
+            (fake_features_1_OC, fake_features_2_OC), O = self._mask_features([fake_features_1, fake_features_2], mask_combined)
 
-            # Mask features
-            real_init_features_NC, real_features_NC, fake_features_NC, diff_features_NC = self._mask_features([real_init_features, real_features, fake_features, diff_features], feature_mask)
+            # MAGNITUDE
+            # Optimize to 1.0
+            magnitude_real_1 = self._magnitude_loss(real_features_1_MC)
+            magnitude_real_2 = self._magnitude_loss(real_features_2_NC)
+            magnitude_real = 0.5 * (magnitude_real_1 + magnitude_real_2)
 
+            magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
+            magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
+            magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
+            
+            # Track
+            magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
+            magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
+            magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
 
-            # Magnitudes
-            real_init_magnitude = self._magnitude_loss(real_init_features)
-            real_magnitude = self._magnitude_loss(real_features_NC)
-            fake_magnitude = self._magnitude_loss(fake_features_NC)
-            diff_magnitude = self._magnitude_loss(diff_features_NC)
+            magnitude = 0.5 * (magnitude_real + magnitude_fake)
 
-            magnitudes = real_magnitude + fake_magnitude + diff_magnitude
+            # COSINE LOSS
+            # Minimize
+            cosine_real_1_vs_fake_1 = self._cosine_loss(real_features_1_MC, fake_features_1_MC, target_value=1, margin=0.1)
+            cosine_real_2_vs_fake_2 = self._cosine_loss(real_features_2_NC, fake_features_2_NC, target_value=1, margin=0.1)
+            cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N)
 
-
-            # Cosine loss
-            real_vs_fake_cos = self._cosine_loss(real_features_NC, fake_features_NC, target_value=1, margin=0.1)
-            fake_vs_diff_cos = self._cosine_loss(fake_features_NC, diff_features_NC, target_value=-1, margin=0.3)
-            real_vs_init_cos = self._cosine_loss(real_features_NC, real_init_features_NC, target_value=1, margin=0.2)
-
-            # MSE loss
-            real_vs_fake_mse = 200* self._mse_loss(real_features_NC, fake_features_NC)
-            fake_vs_diff_mse = 1 - 200* self._mse_loss(fake_features_NC, diff_features_NC)
-            real_vs_init_mse = 200* self._mse_loss(real_features_NC, real_init_features_NC) # TODO: add margin or remove
-
+            # Maximize
+            cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
+            
+            # Anchor
+            cosine_real_1_vs_real_1_init = self._cosine_loss(real_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.2)
+            cosine_real_2_vs_real_2_init = self._cosine_loss(real_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.2)
+            cosine_real_vs_real_init = (M * cosine_real_1_vs_real_1_init + N * cosine_real_2_vs_real_2_init) / (M + N)
             
             a, b, c = self.options.contrastive_weights
 
-            if loss_type == 'mse':
-                contrastive_loss = a * real_vs_fake_mse + b * fake_vs_diff_mse + c * real_vs_init_mse
+            loss = a * cosine_real_vs_fake + b * cosine_fake_1_vs_fake_2 + c * cosine_real_vs_real_init
 
-            elif loss_type == 'cosine':
-                contrastive_loss = a * real_vs_fake_cos + b * fake_vs_diff_cos + c * real_vs_init_cos
-
-            loss = contrastive_loss + magnitudes
-
-
-            # Diversity
-            real_init_div = self._diversity_loss(real_init_features, feature_mask)
-            real_div = self._diversity_loss(real_init_features, feature_mask)
-            fake_div = self._diversity_loss(fake_features, feature_mask)
-
-            # Spatial consistency
-            real_init_con = self._spatial_consistency_loss(real_init_features, feature_mask)
-            real_con = self._spatial_consistency_loss(real_init_features, feature_mask)
-            fake_con = self._spatial_consistency_loss(fake_features, feature_mask)
+            loss += magnitude
 
 
             loss_dict = {
-                'R-F_cos': real_vs_fake_cos.item(),
-                'F-D_cos': fake_vs_diff_cos.item(),
-                'R-RI_cos': real_vs_init_cos.item(),
+                'R-F_cos': cosine_real_vs_fake.item(),
+                'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
+                'R-Ri_cos': cosine_real_vs_real_init.item(),
 
-                'R-F_mse': real_vs_fake_mse.item(),
-                'F-D_mse': fake_vs_diff_mse.item(),
-                'R-RI_mse': real_vs_init_mse.item(),
-                
-                '|RI|': real_init_magnitude.item(),
-                '|R|': real_magnitude.item(),
-                '|F|': fake_magnitude.item(),
-                '|D|': diff_magnitude.item(),
-
-                'RI_div': real_init_div.item(),
-                'R_div': real_div.item(),
-                'F_div': fake_div.item(),
-
-                'RI_cons': real_init_con.item(),
-                'R_cons': real_con.item(),
-                'F_cons': fake_con.item(),
+                '|Ri|': magnitude_real_init.item(),
+                '|R|': magnitude_real.item(),
+                '|F|': magnitude_fake.item(),
 
                 'Total': loss.item(),
             }
@@ -804,7 +769,7 @@ if __name__ == "__main__":
             self.learning_rate = 0.0005
             self.weight_decay = 0.01
 
-            self.num_epochs = 4
+            self.num_epochs = 2
             self.batch_size = 4
             self.gradient_accumulation_samples = 20
             self.validation_frequency = 5
@@ -815,50 +780,44 @@ if __name__ == "__main__":
             self.aug_scale_min = 240/480
             self.aug_scale_max = 960/480
 
-            self.loss_function = 'combined'
-            self.contrastive_weights = (0.5, 0.3, 0.2)
-
 
     logging.basicConfig(level=logging.INFO)
 
     options = Options()
 
+    # Test
 
-    # def cross_validate():
-    #     """
-    #     Run configurations through all datasets and return best configuration.
-    #     """
-
-        # val_losses = []
-
-        # for val_dataset in options.dataset_names:
-
-        #     options.validation_dataset = val_dataset
-
-    options.validation_dataset = 'pantheon'
-
-    w1, w2, w3 = options.contrastive_weights
-    options.experiment_name = f"{options.loss_function}_bpad_w{w1}_{w2}_{w3}_{options.validation_dataset}"
-    options.experiment_name = "test"
-    options.output_path = f"output_encoder/{options.experiment_name}"
-
-    print(f'Training {options.experiment_name}')
-    trainer = TrainerEncoder(options)
-    val_loss = trainer.train()
-
-    #         val_losses.append(val_loss)
-
-    #     mean_val_loss = np.mean(val_losses)
-    #     std_val_loss = np.std(val_losses)
-
-    #     print(f"Mean validation losses:")
-    #     print(mean_val_loss)
-
-    #     print(f"Standard deviation of validation losses:")
-    #     print(std_val_loss)
-
-                
-    #     return mean_val_loss, std_val_loss
+    # options.experiment_name = "test"
 
 
-    # mean_val_loss, std_val_loss = cross_validate()
+    # Validation
+
+    for options.validation_dataset in options.dataset_names:
+
+        options.loss_function = 'separate'
+
+        for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2)]:
+
+            w1, w2 = options.contrastive_weights
+            options.experiment_name = f"val_separate_w{w1}_{w2}_{options.validation_dataset}"
+            options.output_path = f"output_encoder/{options.experiment_name}"
+
+            print(f'Training {options.experiment_name}')
+            trainer = TrainerEncoder(options)
+            val_loss = trainer.train()
+
+
+        options.loss_function = 'combined'
+
+        for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
+
+            w1, w2, w3 = options.contrastive_weights
+            # options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+            options.output_path = f"output_encoder/{options.experiment_name}"
+
+            print(f'Training {options.experiment_name}')
+            trainer = TrainerEncoder(options)
+            val_loss = trainer.train()
+
+
+    print('Finished')
