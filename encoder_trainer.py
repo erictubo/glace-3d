@@ -141,7 +141,7 @@ class TrainerEncoder:
 
             'datasets': options.dataset_names,
             'train_dataset_size': len(self.train_dataset),
-            'val_dataset': options.validation_dataset,
+            'val_dataset': options.val_dataset_name,
             'val_dataset_size': len(self.val_dataset),
 
             'learning_rate': options.learning_rate,
@@ -176,7 +176,7 @@ class TrainerEncoder:
         for dataset_name in self.options.dataset_names:
             dataset_path = Path(self.options.data_path) / dataset_name
 
-            if dataset_name == self.options.validation_dataset:
+            if dataset_name == self.options.val_dataset_name:
                 val_dataset = RealFakeDataset(
                     root_dir=dataset_path,
                     augment=False,
@@ -784,7 +784,7 @@ if __name__ == "__main__":
 
     # # Test
     # options.loss_function = 'separate'
-    # options.validation_dataset = 'brandenburg gate'
+    # options.val_dataset_name = 'brandenburg gate'
     # options.contrastive_weights = (0.6, 0.4)
     # options.experiment_name = "test"
     # options.output_path = f"output_encoder/{options.experiment_name}"
@@ -796,37 +796,37 @@ if __name__ == "__main__":
 
     # # Validation
 
-    # # for options.validation_dataset in options.dataset_names:
+    # # for options.val_dataset_name in options.dataset_names:
 
-    # options.loss_function = 'separate'
+    options.loss_function = 'separate'
     
-    options.validation_dataset = 'brandenburg gate'
+    options.val_dataset_name = 'pantheon'
     options.num_epochs = 1
 
-    # # for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
+    for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
 
     # options.contrastive_weights = (0.6, 0.4)
 
-    # w1, w2 = options.contrastive_weights
-    # options.experiment_name = f"val_separate_w{w1}_{w2}_{options.validation_dataset}"
-    # options.output_path = f"output_encoder/{options.experiment_name}"
-
-    # print(f'Training {options.experiment_name}')
-    # trainer = TrainerEncoder(options)
-    # val_loss = trainer.train()
-
-
-    options.loss_function = 'combined'
-
-    for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
-
-        w1, w2, w3 = options.contrastive_weights
-        options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+        w1, w2 = options.contrastive_weights
+        options.experiment_name = f"val_separate_w{w1}_{w2}_{options.val_dataset_name}"
         options.output_path = f"output_encoder/{options.experiment_name}"
 
         print(f'Training {options.experiment_name}')
         trainer = TrainerEncoder(options)
         val_loss = trainer.train()
+
+
+    # options.loss_function = 'combined'
+
+    # for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
+
+    #     w1, w2, w3 = options.contrastive_weights
+    #     options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.val_dataset_name}"
+    #     options.output_path = f"output_encoder/{options.experiment_name}"
+
+    #     print(f'Training {options.experiment_name}')
+    #     trainer = TrainerEncoder(options)
+    #     val_loss = trainer.train()
 
 
     print('Finished')
