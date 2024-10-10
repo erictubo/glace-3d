@@ -503,8 +503,8 @@ class TrainerEncoder:
         B, C, H, W = features_shape
 
         feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
-        threshold = 0.5  # Adjust this value as needed
-        feature_mask = (feature_mask > threshold).bool()
+        threshold = 0.25  # Adjust this value as needed
+        feature_mask = (feature_mask >= threshold).bool()
 
         # # Visualization:
         # print(image_mask.shape, "->", feature_mask.shape)
@@ -758,13 +758,9 @@ if __name__ == "__main__":
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
             self.dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
-            #self.validation_dataset = 'pantheon'
+
             self.iter_val_limit = 20 # number of samples for each validation
             self.epoch_val_limit = 80 # for epoch validation
-
-            # self.output_path = "output_encoder/fine-tuned_encoder_separate.pt"
-            # self.experiment_name = 'separate 1'
-
 
             self.learning_rate = 0.0005
             self.weight_decay = 0.01
@@ -785,39 +781,52 @@ if __name__ == "__main__":
 
     options = Options()
 
-    # Test
 
+    # # Test
+    # options.loss_function = 'separate'
+    # options.validation_dataset = 'brandenburg gate'
+    # options.contrastive_weights = (0.6, 0.4)
     # options.experiment_name = "test"
+    # options.output_path = f"output_encoder/{options.experiment_name}"
+
+    # print(f'Training {options.experiment_name}')
+    # trainer = TrainerEncoder(options)
+    # val_loss = trainer.train()
 
 
-    # Validation
+    # # Validation
 
-    for options.validation_dataset in options.dataset_names:
+    # # for options.validation_dataset in options.dataset_names:
 
-        options.loss_function = 'separate'
+    # options.loss_function = 'separate'
+    
+    options.validation_dataset = 'brandenburg gate'
+    options.num_epochs = 1
 
-        for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2)]:
+    # # for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
 
-            w1, w2 = options.contrastive_weights
-            options.experiment_name = f"val_separate_w{w1}_{w2}_{options.validation_dataset}"
-            options.output_path = f"output_encoder/{options.experiment_name}"
+    # options.contrastive_weights = (0.6, 0.4)
 
-            print(f'Training {options.experiment_name}')
-            trainer = TrainerEncoder(options)
-            val_loss = trainer.train()
+    # w1, w2 = options.contrastive_weights
+    # options.experiment_name = f"val_separate_w{w1}_{w2}_{options.validation_dataset}"
+    # options.output_path = f"output_encoder/{options.experiment_name}"
+
+    # print(f'Training {options.experiment_name}')
+    # trainer = TrainerEncoder(options)
+    # val_loss = trainer.train()
 
 
-        options.loss_function = 'combined'
+    options.loss_function = 'combined'
 
-        for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
+    for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
 
-            w1, w2, w3 = options.contrastive_weights
-            # options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.validation_dataset}"
-            options.output_path = f"output_encoder/{options.experiment_name}"
+        w1, w2, w3 = options.contrastive_weights
+        options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.validation_dataset}"
+        options.output_path = f"output_encoder/{options.experiment_name}"
 
-            print(f'Training {options.experiment_name}')
-            trainer = TrainerEncoder(options)
-            val_loss = trainer.train()
+        print(f'Training {options.experiment_name}')
+        trainer = TrainerEncoder(options)
+        val_loss = trainer.train()
 
 
     print('Finished')
