@@ -334,6 +334,10 @@ class TrainerEncoder:
             
             else:
                 _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
+
+            if self.iteration >= self.options.max_iterations:
+                _logger.info(f"Stopping training because maximum number of iterations reached")
+                break
                         
         return total_loss / len(self.train_loader)
 
@@ -765,6 +769,7 @@ if __name__ == "__main__":
             self.learning_rate = 0.0005
             self.weight_decay = 0.01
 
+            self.max_iterations = 1250
             self.num_epochs = 2
             self.batch_size = 4
             self.gradient_accumulation_samples = 20
