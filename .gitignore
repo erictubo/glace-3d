@@ -8,6 +8,11 @@ datasets/Cambridge_*
 datasets/wayspots_*
 datasets/pgt_*
 datasets/visloc_pseudo_gt_limitations
+datasets/CVPR23_DeitS_Rerank.pth
 
 # Outputs.
 output/
+output_encoder/
+output_encoder_old/
+runs/
+*.pt
