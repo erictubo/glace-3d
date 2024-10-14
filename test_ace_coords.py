@@ -115,7 +115,7 @@ def visualize_scene_coordinate_map(
         plt.show()
     else:
         if not output_name:
-            output_name = f'{name}_coordinates'
+            output_name = f'{name}'
         plt.savefig(path_to_output / f'{output_name}.png', transparent=True)
     plt.close()
 
@@ -137,9 +137,6 @@ def compare_scene_coordinate_maps(
     coordinates = coordinates.permute(1, 2, 0).numpy()
 
     assert gt_coordinates.shape == coordinates.shape, f"Shapes do not match: {gt_coordinates.shape} != {coordinates.shape}"
-
-    # check that no coordinates are (0, 0, 0)
-    assert not np.any(np.all(coordinates == [0., 0., 0.], axis=-1)), "Some coordinates are (0, 0, 0)"
 
     # Calculate the difference
     difference = np.linalg.norm(coordinates - gt_coordinates, axis=-1)
@@ -175,6 +172,8 @@ def compare_scene_coordinate_maps(
         plt.savefig(path_to_output / f'{name}.png', transparent=True)
     plt.close()
 
+    return np.mean(masked_difference)
+
 
 if __name__ == '__main__':
     # Setup logging.
@@ -191,6 +190,9 @@ if __name__ == '__main__':
                         help='scene index in the room dataset, -1 to use all')
 
     parser.add_argument('network', type=Path, help='path to a network trained for the scene (just the head weights)')
+
+    parser.add_argument('--sparse', type=_strtobool, default=False,
+                        help='For mode 1: load sparse init targets when True, generate from depth when False.')
 
     parser.add_argument('--feat_name', type=str, default='features.npy',
                         help='global feature name.')
@@ -262,6 +264,7 @@ if __name__ == '__main__':
     testset = CamLocDataset(
         root_dir = scene_path / "test",
         mode = 1, # ground truth scene coordinates
+        sparse = opt.sparse,
         image_height = opt.image_resolution,
         feat_name = opt.feat_name,
     )
@@ -286,32 +289,32 @@ if __name__ == '__main__':
     # Save the outputs in the same folder as the network being evaluated.
     output_dir = head_network_path.parent
     scene_name = scene_path.name
-    # This will contain aggregate scene stats (median translation/rotation errors, and avg processing time per frame).
-    test_log_file = output_dir / f'test_{scene_name}_{opt.session}.txt'
-    _logger.info(f"Saving test aggregate statistics to: {test_log_file}")
-    # This will contain each frame's pose (stored as quaternion + translation) and errors.
-    pose_log_file = output_dir / f'poses_{scene_name}_{opt.session}.txt'
-    _logger.info(f"Saving per-frame poses and errors to: {pose_log_file}")
 
-    # Setup output files.
+    network_name = head_network_path.stem
+    encoder_name = encoder_path.stem
+    eval_path = scene_path / "test" / (network_name + "-" + encoder_name)
+
+    # # Setup output files.
+    dist_log_file = eval_path / f'avg_distances.txt'
+    test_log_file = eval_path / f'mean_avg_dist.txt'
+    dist_log = open(dist_log_file, 'w', 1)
     test_log = open(test_log_file, 'w', 1)
-    pose_log = open(pose_log_file, 'w', 1)
 
     # Metrics of interest.
     avg_batch_time = 0
     num_batches = 0
 
-    # Keep track of rotation and translation errors for calculation of the median error.
-    rErrs = []
-    tErrs = []
+    # Keep track of the average distances.
+    avg_distances = []
 
-    # Percentage of frames predicted within certain thresholds from their GT pose.
-    pct10_5 = 0
-    pct5 = 0
-    pct2 = 0
-    pct1 = 0
+    id = 0
+    total = len(testset)
 
-    total_frames = 0
+    if not eval_path.exists(): eval_path.mkdir()
+
+    for dir in ['init_viz', 'init_pred', 'init_viz_pred', 'init_viz_diff']:
+        path = eval_path / dir
+        if not path.exists(): path.mkdir()
 
     # Testing loop.
     testing_start_time = time.time()
@@ -343,52 +346,63 @@ if __name__ == '__main__':
                 assert torch.allclose(intrinsics_33[0, 0], intrinsics_33[1, 1])
 
                 # Remove path from file name
-                frame_name = Path(frame_path).name
+                frame_name = Path(frame_path).name.split('.')[0]
 
+                # Save predicted scene coordinates
+                torch.save(scene_coordinates_3HW, eval_path / "init_pred" / f"{frame_name}.dat")
 
-                # TODO: visualize individual scene coordinates
-
+                # Visualize scene coordinates
                 visualize_scene_coordinate_map(
                     gt_scene_coords_3HW,
                     frame_name,
-                    # scene_path / "test",
+                    eval_path / "init_viz",
                 )
-
                 visualize_scene_coordinate_map(
                     scene_coordinates_3HW,
                     frame_name,
-                    # scene_path / "test",
+                    eval_path / "init_viz_pred",
                 )
 
-
-                # TODO: compare scene coordinates with GT scene coordinates
-                # only where GT scene coordinates are available
-
-                print(f"Frame: {frame_name}")
-
-                compare_scene_coordinate_maps(
+                # Compare scene coordinates with GT scene coordinates
+                avg_dist = compare_scene_coordinate_maps(
                     gt_scene_coords_3HW,
                     scene_coordinates_3HW,
                     frame_name,
-                    # scene_path / "test",
+                    eval_path / "init_viz_diff",
                 )
 
+                avg_dist = round(avg_dist, 2)
 
-                # TODO: save predicted scene coordinates to directory: scene_path / "test" / "pred_init"
+                avg_distances.append(avg_dist)
 
-                # network_name = head_network_path.stem
-                # encoder_name = encoder_path.stem
-                # pred_path = scene_path / "test" / "init_pred_" + network_name + "_" + encoder_name
+                id += 1
 
-                # torch.save(scene_coordinates_3HW, pred_path / f"{frame_name.split('.')[0]}.dat")
+                print(f"{id}/{total}: {avg_dist}")
 
-                total_frames += 1
+                dist_log.write(f"{id} {frame_name}: {avg_dist}\n")
+
             
             avg_batch_time += time.time() - batch_start_time
             num_batches += 1
 
     
-    assert total_frames == len(testset)
+    assert id == total
+
+    # TODO: save average distances to file as frame: dist
+    # TODO: save median at start of file
+
+    avg_distances.sort()
+    median_idx = total // 2
+    median_avg_distance = avg_distances[median_idx]
+
+    print("Median average distance: ", median_avg_distance)
+
+    test_log.write(f"Median: {median_avg_distance}\n")
+
+    test_log.close()
+    dist_log.close()
 
 
-
+# 1. Save predictions
+# 2. Compare predictions to GT
+# 3. Compare fake predictions to real predictions / real GT
