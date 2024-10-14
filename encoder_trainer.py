@@ -23,6 +23,9 @@ _logger = logging.getLogger(__name__)
 
 
 class TensorBoardLogger:
+    """
+    Logging of training and validation losses to TensorBoard.
+    """
     def __init__(self, log_dir, config):
         self.writer = SummaryWriter(log_dir)
         
@@ -49,7 +52,7 @@ class TensorBoardLogger:
 
 class TrainerEncoder:
     """
-    Trainer class for fine-tuning the pre-trained encoder network.
+    Fine-tuning of a pre-trained encoder network to bridge the domain gap between real and fake images.
     """
 
     def __init__(self, options):
@@ -84,6 +87,7 @@ class TrainerEncoder:
 
         # Dataset
         self.val_dataset, self.train_dataset, weights = self._load_datasets()
+        _logger.info(f"Loaded training and validation datasets")
 
         # Sampler to represent datasets equally
         sampler = WeightedRandomSampler(
@@ -105,8 +109,6 @@ class TrainerEncoder:
         #     shuffle=False,
         #     collate_fn=custom_collate,
         # )
-        
-        _logger.info(f"Loaded training and validation datasets")
 
         # Loss function
         if self.options.loss_function == 'separate':
@@ -172,6 +174,9 @@ class TrainerEncoder:
         
 
     def _load_datasets(self):
+        """
+        Load training and validation datasets.
+        """
         train_datasets = []
         for dataset_name in self.options.dataset_names:
             dataset_path = Path(self.options.data_path) / dataset_name
@@ -210,11 +215,10 @@ class TrainerEncoder:
     
     def train(self):
 
-        # _logger.info(f"Initial validation ...")
-
+        # Make sure saving the model works
         self.save_model(f"{self.options.output_path}_e{self.epoch}.pt")
 
-        # Validation
+        # Initial validation
         self.encoder.eval()
         val_loss, val_loss_dict = self._validate(self.options.epoch_val_limit)
         self.logger.log_validation_epoch(val_loss_dict, self.epoch)
@@ -226,16 +230,14 @@ class TrainerEncoder:
         patience = 2
         patience_counter = 0
 
-
         _logger.info(f"Starting training ...")
         self.training_start = time.time()
-
 
         while self.epoch < self.options.num_epochs:
 
             self.epoch += 1
 
-            # Update negative samples
+            # Update negative samples for each epoch
             if isinstance(self.train_dataset, ConcatDataset):
                 for dataset in self.train_dataset.datasets:
                     dataset.set_epoch(self.epoch)
@@ -301,6 +303,7 @@ class TrainerEncoder:
             loss /= self.options.gradient_accumulation_steps
             self.scaler.scale(loss).backward()
 
+            # Gradient accumulation
             if self.iteration % self.options.gradient_accumulation_steps == 0:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -335,14 +338,17 @@ class TrainerEncoder:
             else:
                 _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
 
+            # Stop training if maximum number of iterations reached
             if self.iteration >= self.options.max_iterations:
                 _logger.info(f"Stopping training because maximum number of iterations reached")
                 break
                         
         return total_loss / len(self.train_loader)
 
-    
     def get_random_validation_subset(self, n_samples):
+        """
+        Choose a random subset of the validation dataset.
+        """
         val_limit = min(n_samples, len(self.val_dataset))
         indices = torch.randperm(len(self.val_dataset))[:val_limit]
         subset = torch.utils.data.Subset(self.val_dataset, indices)
@@ -352,7 +358,6 @@ class TrainerEncoder:
             shuffle=False,
             collate_fn=custom_collate,
         )
-
     
     def _validate(self, n_samples):
 
@@ -392,45 +397,42 @@ class TrainerEncoder:
     """
     LOSS FUNCTIONS
     """
-
-    # def _magnitude_loss(self, features, target_value=1.0, margin=0.1):
-
-    #     feature_norms = torch.norm(features, dim=1)
-    #     losses = F.relu(torch.abs(target_value - feature_norms) - margin)
-
-    #     return losses.mean()
     
     def _magnitude_loss(self, features, target_value=1.0, margin=0.15):
 
         magnitude = torch.mean(torch.norm(features, p=2, dim=1))
 
         return F.relu(torch.abs(target_value - magnitude) - margin)
-
-
-    def _mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0, p=1):
-
-        features_1 = F.normalize(features_1, p=p, dim=1)
-        features_2 = F.normalize(features_2, p=p, dim=1)
-
-        mse = F.mse_loss(features_1, features_2, reduction='none')
-
-        losses = F.relu(torch.abs(target_value - mse) - margin)
-
-        return losses.mean()
     
-    def _mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True, p=1):
+        # feature_norms = torch.norm(features, dim=1)
+        # losses = F.relu(torch.abs(target_value - feature_norms) - margin)
 
-        features_1 = F.normalize(features_1, p=p, dim=1)
-        features_2 = F.normalize(features_2, p=p, dim=1)
+        # return losses.mean()
 
-        if smooth:
-            mae = F.smooth_l1_loss(features_1, features_2, reduction='none')
-        else:
-            mae = F.l1_loss(features_1, features_2, reduction='none')
+    # def _mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0, p=1):
 
-        losses = F.relu(torch.abs(target_value - mae) - margin)
+    #     features_1 = F.normalize(features_1, p=p, dim=1)
+    #     features_2 = F.normalize(features_2, p=p, dim=1)
 
-        return losses.mean()
+    #     mse = F.mse_loss(features_1, features_2, reduction='none')
+
+    #     losses = F.relu(torch.abs(target_value - mse) - margin)
+
+    #     return losses.mean()
+    
+    # def _mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True, p=1):
+
+    #     features_1 = F.normalize(features_1, p=p, dim=1)
+    #     features_2 = F.normalize(features_2, p=p, dim=1)
+
+    #     if smooth:
+    #         mae = F.smooth_l1_loss(features_1, features_2, reduction='none')
+    #     else:
+    #         mae = F.l1_loss(features_1, features_2, reduction='none')
+
+    #     losses = F.relu(torch.abs(target_value - mae) - margin)
+
+    #     return losses.mean()
     
     def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
 
@@ -440,85 +442,86 @@ class TrainerEncoder:
 
         return losses.mean()
     
-    def _diversity_loss(self, features, feature_mask):
-        B, C, H, W = features.shape
+    # def _diversity_loss(self, features, feature_mask):
+    #     B, C, H, W = features.shape
         
-        # Reshape features
-        features_reshaped = features.view(B, C, -1)  # Shape: (B, C, H*W)
+    #     # Reshape features
+    #     features_reshaped = features.view(B, C, -1)  # Shape: (B, C, H*W)
         
-        # Reshape mask_1
-        mask_reshaped = feature_mask.view(B, 1, -1)  # Shape: (B, 1, H*W)
+    #     # Reshape mask_1
+    #     mask_reshaped = feature_mask.view(B, 1, -1)  # Shape: (B, 1, H*W)
         
-        # Apply mask_1
-        features_masked = features_reshaped * mask_reshaped  # Broadcasting the mask_1
+    #     # Apply mask_1
+    #     features_masked = features_reshaped * mask_reshaped  # Broadcasting the mask_1
         
-        # Normalize features
-        features_norm = F.normalize(features_masked, p=2, dim=1)
+    #     # Normalize features
+    #     features_norm = F.normalize(features_masked, p=2, dim=1)
         
-        # Compute similarity matrix
-        similarity_matrix = torch.bmm(features_norm, features_norm.transpose(1, 2))
+    #     # Compute similarity matrix
+    #     similarity_matrix = torch.bmm(features_norm, features_norm.transpose(1, 2))
         
-        # Compute diversity loss
-        eye = torch.eye(C, device=features.device).unsqueeze(0).expand(B, -1, -1)
-        diversity_loss = torch.mean((similarity_matrix - eye) ** 2)
+    #     # Compute diversity loss
+    #     eye = torch.eye(C, device=features.device).unsqueeze(0).expand(B, -1, -1)
+    #     diversity_loss = torch.mean((similarity_matrix - eye) ** 2)
 
-        return diversity_loss
+    #     return diversity_loss
 
-    def _spatial_consistency_loss(self, features, feature_mask):
+    # def _spatial_consistency_loss(self, features, feature_mask):
 
-        assert len(features.shape) == 4, features.shape
-        B, C, H, W = features.shape
+    #     assert len(features.shape) == 4, features.shape
+    #     B, C, H, W = features.shape
 
-        mask_B1HW = feature_mask
-        mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
+    #     mask_B1HW = feature_mask
+    #     mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
 
-        assert mask_BCHW.shape == (B, C, H, W), mask_BCHW.shape
+    #     assert mask_BCHW.shape == (B, C, H, W), mask_BCHW.shape
         
-        # Compute gradients in x and y directions
-        grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
-        grad_y = features[:, :, 1:, :] - features[:, :, :-1, :]
+    #     # Compute gradients in x and y directions
+    #     grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
+    #     grad_y = features[:, :, 1:, :] - features[:, :, :-1, :]
 
-        # Update mask_1 to exclude border pixels (where gradients are not valid)
-        mask_x = mask_BCHW[:, :, :, 1:] & mask_BCHW[:, :, :, :-1]
-        mask_y = mask_BCHW[:, :, 1:, :] & mask_BCHW[:, :, :-1, :]
+    #     # Update mask_1 to exclude border pixels (where gradients are not valid)
+    #     mask_x = mask_BCHW[:, :, :, 1:] & mask_BCHW[:, :, :, :-1]
+    #     mask_y = mask_BCHW[:, :, 1:, :] & mask_BCHW[:, :, :-1, :]
 
-        # mask_1 gradients
-        grad_x_masked = grad_x[mask_x]
-        grad_y_masked = grad_y[mask_y]
+    #     # mask_1 gradients
+    #     grad_x_masked = grad_x[mask_x]
+    #     grad_y_masked = grad_y[mask_y]
 
-        # Compute total variation
-        return torch.mean(torch.abs(grad_x_masked)) + torch.mean(torch.abs(grad_y_masked))
+    #     # Compute total variation
+    #     return torch.mean(torch.abs(grad_x_masked)) + torch.mean(torch.abs(grad_y_masked))
 
-    def _triplet_loss(self, anchor, positive, negative, margin=0.2):
+    # def _triplet_loss(self, anchor, positive, negative, margin=0.2):
 
-        distance_positive = F.pairwise_distance(anchor, positive, p=2)
-        distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
+    #     distance_positive = F.pairwise_distance(anchor, positive, p=2)
+    #     distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
 
-        losses = F.relu(distance_positive - distance_negative + margin)
+    #     losses = F.relu(distance_positive - distance_negative + margin)
 
-        return losses.mean()
+    #     return losses.mean()
     
     @staticmethod
-    def _resize_mask_to_features(image_mask, features_shape):
+    def _resize_mask_to_features(image_mask, features_shape, threshold=0.25, visualize=False):
         """
-        Resize mask_1 to the same size as features.
+        Resize mask to the same size as features, subsampling to each patch.
+        Input: image_mask (shape Bx1xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
+        Output: feature_mask (shape Bx1xHxW)
         """
 
         B, C, H, W = features_shape
 
         feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
-        threshold = 0.25  # Adjust this value as needed
         feature_mask = (feature_mask >= threshold).bool()
 
-        # # Visualization:
-        # print(image_mask.shape, "->", feature_mask.shape)
-        # import matplotlib.pyplot as plt
-        # fig, ax = plt.subplots(2, 4)
-        # for i in range(B):
-        #     ax[0, i].imshow(image_mask[i][0].cpu(), cmap='gray')
-        #     ax[1, i].imshow(feature_mask[i][0].cpu(), cmap='gray')
-        #     print('...')
-        # plt.show()
+        if visualize:
+            print(image_mask.shape, "->", feature_mask.shape)
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(2, 4)
+            for i in range(B):
+                ax[0, i].imshow(image_mask[i][0].cpu(), cmap='gray')
+                ax[1, i].imshow(feature_mask[i][0].cpu(), cmap='gray')
+                print('...')
+            plt.show()
 
         assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
@@ -529,7 +532,9 @@ class TrainerEncoder:
     @staticmethod
     def _mask_features(features_list, feature_mask):
         """
-        mask_1 features to valid values only.
+        Mask features to valid values only, reshaping to 2D tensor.\\
+        Input: features_list (shape BxCxHxW each), feature_mask (shape Bx1xHxW)\\
+        Output: valid_features_list (shape MxC each, where M is the number of valid patches, M <= N = B*H*W)
         """
 
         B, C, H, W = features_list[0].shape
@@ -579,7 +584,10 @@ class TrainerEncoder:
 
     def _compute_separate_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode):
         """
-        Loss for separate encoder to get fake_features close to real_init_features.
+        Loss for training a separate encoder:
+        A) make fake_features similar to real_init_features (real_vs_fake),
+        B) keep fake_features_1 and fake_features_2 distinct (fake_1_vs_fake_2),
+        + Maintain magntiude of features close to 1.0.
         """
 
         assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
@@ -597,7 +605,6 @@ class TrainerEncoder:
                 fake_features_1 = self.encoder(fake_image_1)
                 fake_features_2 = self.encoder(fake_image_2)
 
-
             # MASKING
             mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
             mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
@@ -608,7 +615,6 @@ class TrainerEncoder:
 
             (real_init_features_1_OC, fake_features_1_OC, real_init_features_2_OC, fake_features_2_OC), O = \
                 self._mask_features([real_init_features_1, fake_features_1, real_init_features_2, fake_features_2], mask_combined)
-
 
             # MAGNITUDE LOSS
             magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
@@ -621,13 +627,11 @@ class TrainerEncoder:
 
             magnitude = magnitude_fake
 
-
             # COSINE LOSS
-
             # Minimize
             cosine_fake_1_vs_real_1_init = self._cosine_loss(fake_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.1)
             cosine_fake_2_vs_real_2_init = self._cosine_loss(fake_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.1)
-            cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N)
+            cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N) # Equal weighting of each valid patch
 
             # Maximize
             cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
@@ -635,15 +639,11 @@ class TrainerEncoder:
             # Track
             cosine_real_1_init_vs_real_2_init = self._cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
 
-            # IDEA: anchor fake difference to real_init difference
-
-
             a, b = self.options.contrastive_weights
-            
+
             loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
 
             loss += magnitude
-
 
             loss_dict = {
                 'F-Ri_cos': cosine_fake_vs_real_init.item(),
@@ -660,7 +660,11 @@ class TrainerEncoder:
     
     def _compute_combined_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode):
         """
-        Contrastive loss function + magnitude loss.
+        Loss for training a combined encoder:
+        A) make fake_features similar to real_features (real_vs_fake),
+        B) keep fake_features_1 and fake_features_2 distinct (fake_1_vs_fake_2),
+        C) anchor real_features to real_init_features (real_vs_real_init),
+        + Maintain magntiude of features close to 1.0.
         """
 
         assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
@@ -710,7 +714,7 @@ class TrainerEncoder:
             # Minimize
             cosine_real_1_vs_fake_1 = self._cosine_loss(real_features_1_MC, fake_features_1_MC, target_value=1, margin=0.1)
             cosine_real_2_vs_fake_2 = self._cosine_loss(real_features_2_NC, fake_features_2_NC, target_value=1, margin=0.1)
-            cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N)
+            cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N) # Equal weighting of each valid patch
 
             # Maximize
             cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
@@ -725,7 +729,6 @@ class TrainerEncoder:
             loss = a * cosine_real_vs_fake + b * cosine_fake_1_vs_fake_2 + c * cosine_real_vs_real_init
 
             loss += magnitude
-
 
             loss_dict = {
                 'R-F_cos': cosine_real_vs_fake.item(),
@@ -799,39 +802,34 @@ if __name__ == "__main__":
     # val_loss = trainer.train()
 
 
-    # # Validation
+    # Validation
 
-    # # for options.val_dataset_name in options.dataset_names:
+    for options.val_dataset_name in options.dataset_names:
 
-    options.loss_function = 'separate'
-    
-    options.val_dataset_name = 'pantheon'
-    options.num_epochs = 1
+        options.loss_function = 'separate'
 
-    for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
+        for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
 
-    # options.contrastive_weights = (0.6, 0.4)
+            w1, w2 = options.contrastive_weights
+            options.experiment_name = f"val_separate_w{w1}_{w2}_{options.val_dataset_name}"
+            options.output_path = f"output_encoder/{options.experiment_name}"
 
-        w1, w2 = options.contrastive_weights
-        options.experiment_name = f"val_separate_w{w1}_{w2}_{options.val_dataset_name}"
-        options.output_path = f"output_encoder/{options.experiment_name}"
-
-        print(f'Training {options.experiment_name}')
-        trainer = TrainerEncoder(options)
-        val_loss = trainer.train()
+            print(f'Training {options.experiment_name}')
+            trainer = TrainerEncoder(options)
+            val_loss = trainer.train()
 
 
-    # options.loss_function = 'combined'
+        options.loss_function = 'combined'
 
-    # for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
+        for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
 
-    #     w1, w2, w3 = options.contrastive_weights
-    #     options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.val_dataset_name}"
-    #     options.output_path = f"output_encoder/{options.experiment_name}"
+            w1, w2, w3 = options.contrastive_weights
+            options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.val_dataset_name}"
+            options.output_path = f"output_encoder/{options.experiment_name}"
 
-    #     print(f'Training {options.experiment_name}')
-    #     trainer = TrainerEncoder(options)
-    #     val_loss = trainer.train()
+            print(f'Training {options.experiment_name}')
+            trainer = TrainerEncoder(options)
+            val_loss = trainer.train()
 
 
     print('Finished')
