@@ -21,6 +21,7 @@ class RealFakeDataset(Dataset):
     def __init__(
             self,
             root_dir,
+            name: str,
             augment=False,
             augment_color=False,
             use_half=True,
@@ -44,6 +45,8 @@ class RealFakeDataset(Dataset):
             negative_sample_fraction=0.1,
         ):
 
+        self.name = name
+
         self.augment = augment
         self.augment_color = augment_color
         self.use_half = use_half
@@ -58,6 +61,7 @@ class RealFakeDataset(Dataset):
         self.aug_saturation = aug_saturation
         self.aug_hue = aug_hue
 
+
         root_dir = Path(root_dir)
 
         self.real_rgb_dir = root_dir / 'rgb real'
@@ -66,6 +70,9 @@ class RealFakeDataset(Dataset):
         self.intrinsics_dir = root_dir / 'calibration'
         self.fake_depth_dir = root_dir / 'depth'
         # self.real_coords_dir = root_dir / 'init'
+
+        self.real_global_features = np.load(root_dir / 'features real.npy')
+        self.fake_global_features = np.load(root_dir / 'features fake.npy')
 
         self.real_rgb_files = sorted(self.real_rgb_dir.iterdir())
         self.fake_rgb_files = sorted(self.fake_rgb_dir.iterdir())
@@ -238,10 +245,13 @@ class RealFakeDataset(Dataset):
         
         assert fake_coords_1.shape == fake_image_1.shape, f"Fake coords shape {fake_coords_1.shape} does not match image shape {fake_image_1.shape}"
         assert fake_coords_2.shape == fake_image_2.shape, f"Fake coords shape {fake_coords_2.shape} does not match image shape {fake_image_2.shape}"
+
+        fake_glob_1 = torch.from_numpy(self.fake_global_features[idx]).float()
+        fake_glob_2 = torch.from_numpy(self.fake_global_features[negative_idx]).float()
         
         # TODO: [IDEA] return as dictionary instead of tuple
 
-        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance
+        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx, negative_idx
         
     @staticmethod
     def _resize_image(image, target_height):
@@ -274,7 +284,7 @@ class RealFakeDataset(Dataset):
     
     def _get_single_item(self, idx, image_height, angle=None):
         try:
-            real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance = self._load_image_set(idx)
+            real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2 = self._load_image_set(idx)
         except Exception as e:
             logging.error(f"Error loading image trio at index {idx}: {str(e)}")
             raise
@@ -349,8 +359,8 @@ class RealFakeDataset(Dataset):
         assert fake_coords_1.shape == fake_coords_2.shape, f"Shape mismatch: fake coords 1 {fake_coords_1.shape}, fake coords 2 {fake_coords_2.shape}"
 
         assert fake_coords_1.shape[1:] == fake_image_1.shape[1:], f"Shape mismatch: fake coords 1 {fake_coords_1.shape}, fake image 1 {fake_image_1.shape}"
-            
-        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance
+        
+        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, self.name
 
     def __getitem__(self, idx):
         if self.augment:
@@ -373,7 +383,7 @@ def custom_collate(batch):
     """
     Custom collate function for DataLoader that randomly pads images to the same size.
     """
-    real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, distances = zip(*batch)
+    real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, names = zip(*batch)
 
     # Find max dimensions
     max_height = max([img.shape[1] for img in real_images_1])
@@ -430,7 +440,25 @@ def custom_collate(batch):
     
     assert fake_coords_1_padded.shape[2:] == fake_images_1_padded.shape[2:], f"Shape mismatch: fake coords 1 {fake_coords_1_padded.shape}, fake image 1 {fake_images_1_padded.shape}"
 
-    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, distances
+    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, idx_1, idx_2, names
+
+
+def coords_to_colors(coords):
+    # 1. Convert coords to numpy array
+    coords = coords.permute(1, 2, 0).numpy()
+
+    # 2. Mask out zero values in coords
+    mask = np.all(coords == [0., 0., 0.], axis=-1)
+    masked_coords = np.ma.masked_array(coords, mask=np.repeat(mask[:, :, np.newaxis], 3, axis=2))
+
+    # 3. Normalize coords to [0, 1]
+    min_coords = np.floor(masked_coords.min(axis=(0, 1)))
+    max_coords = np.ceil(masked_coords.max(axis=(0, 1)))
+    normalized_coords = (masked_coords - min_coords) / (max_coords - min_coords)
+
+    normalized_coords = np.where(mask[:, :, np.newaxis], 1, normalized_coords)
+
+    return normalized_coords.astype(np.float32)
 
 
 if __name__ == '__main__':
@@ -443,25 +471,9 @@ if __name__ == '__main__':
     data_path = "/home/johndoe/Documents/data/Transfer Learning/"
     dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
 
-    def coords_to_colors(coords):
-        # 1. Convert coords to numpy array
-        coords = coords.permute(1, 2, 0).numpy()
-
-        # 2. Mask out zero values in coords
-        mask = np.all(coords == [0., 0., 0.], axis=-1)
-        masked_coords = np.ma.masked_array(coords, mask=np.repeat(mask[:, :, np.newaxis], 3, axis=2))
-
-        # 3. Normalize coords to [0, 1]
-        min_coords = np.floor(masked_coords.min(axis=(0, 1)))
-        max_coords = np.ceil(masked_coords.max(axis=(0, 1)))
-        normalized_coords = (masked_coords - min_coords) / (max_coords - min_coords)
-
-        normalized_coords = np.where(mask[:, :, np.newaxis], 1, normalized_coords)
-
-        return normalized_coords.astype(np.float32)
 
     for dataset_name in dataset_names:
-        dataset = RealFakeDataset(data_path + dataset_name, augment=True, augment_color=True)
+        dataset = RealFakeDataset(data_path + dataset_name, dataset_name, augment=True, augment_color=True)
         
         # sample 4 random images from the dataset
         idx = random.sample(range(len(dataset)), 4)
@@ -470,7 +482,7 @@ if __name__ == '__main__':
         fig, ax = plt.subplots(4, 8)
 
         for i, sample in enumerate(batch):
-            real_1, real_2, fake_1, fake_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance = sample
+            real_1, real_2, fake_1, fake_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, name = sample
 
             combined_mask = torch.logical_and(mask_1, mask_2)
 
@@ -490,7 +502,7 @@ if __name__ == '__main__':
 
         batch = custom_collate(batch)
 
-        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, distances = batch
+        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, names = batch
 
         combined_masks = torch.logical_and(masks_1, masks_2)
 
