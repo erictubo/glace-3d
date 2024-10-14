@@ -26,6 +26,12 @@ class RealFakeDataset(Dataset):
             use_half=True,
             image_height=480,
 
+            # TODO: add option for foreground masking
+            # ignore_background=True,
+
+            # TODO: add option for GT scene coordinates
+            # use_coords=True,
+
             aug_rotation=40,
             aug_scale_min=240/480,
             aug_scale_max=960/480,
@@ -57,15 +63,21 @@ class RealFakeDataset(Dataset):
         self.real_rgb_dir = root_dir / 'rgb real'
         self.fake_rgb_dir = root_dir / 'rgb fake'
         self.poses_dir = root_dir / 'poses'
-        self.depth_dir = root_dir / 'depth'
+        self.intrinsics_dir = root_dir / 'calibration'
+        self.fake_depth_dir = root_dir / 'depth'
+        # self.real_coords_dir = root_dir / 'init'
 
         self.real_rgb_files = sorted(self.real_rgb_dir.iterdir())
         self.fake_rgb_files = sorted(self.fake_rgb_dir.iterdir())
         self.poses_files = sorted(self.poses_dir.iterdir())
-        self.depth_files = sorted(self.depth_dir.iterdir())
+        self.intrinsics_files = sorted(self.intrinsics_dir.iterdir())
+        self.fake_depth_files = sorted(self.fake_depth_dir.iterdir())
+        # self.real_coords_files = sorted(self.real_coords_dir.iterdir())
 
-        assert len(self.real_rgb_files) == len(self.fake_rgb_files) == len(self.poses_files) == len(self.depth_files), \
-            f'Number of real images ({len(self.real_rgb_files)}), rendered images ({len(self.fake_rgb_files)}), poses ({len(self.poses_files)}), and depth maps ({len(self.depth_files)}) do not match'
+
+        assert len(self.real_rgb_files) == len(self.fake_rgb_files) == len(self.poses_files) == len(self.intrinsics_files) == len(self.fake_depth_files), \
+            f'Number of real images ({len(self.real_rgb_files)}), rendered images ({len(self.fake_rgb_files)}), poses ({len(self.poses_files)}), \
+                intrinsics ({len(self.intrinsics_files)}), and fake depth maps ({len(self.fake_depth_files)}) do not match.'
 
         self.image_transform = self._get_image_transform(normalize=False)
         self.image_transform_normalized = self._get_image_transform(normalize=True)
@@ -99,36 +111,6 @@ class RealFakeDataset(Dataset):
 
     def set_epoch(self, epoch):
         self.epoch = epoch
-    
-    def _load_image_set(self, idx):
-        real_image_1 = io.imread(self.real_rgb_files[idx])
-        fake_image_1 = io.imread(self.fake_rgb_files[idx])
-        pose = np.loadtxt(self.poses_files[idx])
-
-        is_landscape = real_image_1.shape[1] > real_image_1.shape[0]
-        negative_idx, distance = self._get_negative_sample(idx, pose, is_landscape)
-        real_image_2 = io.imread(self.real_rgb_files[negative_idx])
-        fake_image_2 = io.imread(self.fake_rgb_files[negative_idx])
-
-        assert negative_idx != idx, f"Negative sample {negative_idx} is the same as positive sample {idx}"
-
-        logging.debug(f"Loaded image trio: real 1 {real_image_1.shape}, real 2 {real_image_2.shape}, fake 1 {fake_image_1.shape}, fake 2 {fake_image_2.shape}")
-
-        for img in [real_image_1, real_image_2, fake_image_1, fake_image_2]:
-            if len(img.shape) < 3:
-                img = color.gray2rgb(img)
-
-        # load depth map (npy file) and convert to boolean mask (where depth is not 0)
-        mask_1 = (np.load(self.depth_files[idx]) > 0).astype(np.float32)
-        mask_2 = (np.load(self.depth_files[negative_idx]) > 0).astype(np.float32)
-
-        mask_1 = np.expand_dims(mask_1, axis=2)
-        mask_2 = np.expand_dims(mask_2, axis=2)
-
-        assert mask_1.shape[:2] == fake_image_1.shape[:2], f"Mask shape {mask_1.shape} does not match image shape {fake_image_1.shape}"
-        assert mask_2.shape[:2] == fake_image_2.shape[:2], f"Mask shape {mask_2.shape} does not match image shape {fake_image_2.shape}"
-
-        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance
 
     def _get_negative_sample(self, idx, pose, is_landscape):
         """
@@ -164,7 +146,109 @@ class RealFakeDataset(Dataset):
             return random.choice(valid_indices)
         
         return farthest_idx, max_distance
+    
+    def _convert_depth_to_coords(
+            self,
+            depth: np.ndarray,
+            pose: np.ndarray,
+            focal_length_pix: float,
+            mm_to_m=True,
+        ) -> np.ndarray:
+        """
+        Convert a depth map to 3D coordinates in the scene.
+        """
+        assert pose.shape == (4, 4), f"Pose shape {pose.shape} is not (4, 4)"
 
+        if mm_to_m:
+            depth = depth / 1000
+
+        # no subsampling, only conversion from depth to 3D coordinates
+
+        # create ndarray with xy values
+        xy = np.zeros(2, depth.shape[0], depth.shape[1])
+        for y in range(depth.shape[0]):
+            for x in range(depth.shape[1]):
+                xy[:, y, x] = [x, y]
+        
+        # set middle to zero
+        xy[0] -= depth.shape[1] / 2
+        xy[1] -= depth.shape[0] / 2
+
+        # reproject
+        xy[0] *= depth / focal_length_pix
+        xy[1] *= depth / focal_length_pix
+
+        eye = np.ndarray((4, depth.shape[0], depth.shape[1]))
+        eye[0:2] = xy
+        eye[2] = depth
+        eye[3] = 1
+
+        coords = np.matmul(pose.numpy(), eye.reshape(4, -1))
+        coords = coords.reshape(4, depth.shape[0], depth.shape[1])
+
+        # set pixels with invalid depth to zero
+        coords[:, depth == 0] = 0
+        coords[:, depth > 1000] = 0
+        
+        return coords[:3] # shape: (3, height, width)
+    
+    def _load_image_set(self, idx):
+        real_image_1 = io.imread(self.real_rgb_files[idx])
+        fake_image_1 = io.imread(self.fake_rgb_files[idx])
+        pose_1 = np.loadtxt(self.poses_files[idx])
+
+        is_landscape = real_image_1.shape[1] > real_image_1.shape[0]
+        negative_idx, distance = self._get_negative_sample(idx, pose_1, is_landscape)
+        real_image_2 = io.imread(self.real_rgb_files[negative_idx])
+        fake_image_2 = io.imread(self.fake_rgb_files[negative_idx])
+        pose_2 = np.loadtxt(self.poses_files[negative_idx])
+
+        assert negative_idx != idx, f"Negative sample {negative_idx} is the same as positive sample {idx}"
+
+        logging.debug(f"Loaded image trio: real 1 {real_image_1.shape}, real 2 {real_image_2.shape}, fake 1 {fake_image_1.shape}, fake 2 {fake_image_2.shape}")
+
+        for img in [real_image_1, real_image_2, fake_image_1, fake_image_2]:
+            if len(img.shape) < 3:
+                img = color.gray2rgb(img)
+
+        # load depth map (npy file)
+        fake_depth_1 = np.load(self.fake_depth_files[idx])
+        fake_depth_2 = np.load(self.fake_depth_files[negative_idx])
+
+        # create mask from depth map
+        mask_1 = (fake_depth_1 > 0).astype(np.float32)
+        mask_2 = (fake_depth_2 > 0).astype(np.float32)
+
+        mask_1 = np.expand_dims(mask_1, axis=2)
+        mask_2 = np.expand_dims(mask_2, axis=2)
+
+        assert mask_1.shape[:2] == fake_image_1.shape[:2], f"Mask shape {mask_1.shape} does not match image shape {fake_image_1.shape}"
+        assert mask_2.shape[:2] == fake_image_2.shape[:2], f"Mask shape {mask_2.shape} does not match image shape {fake_image_2.shape}"
+
+        focal_length_1 = float(np.loadtxt(self.intrinsics_files[idx]))
+        focal_length_2 = float(np.loadtxt(self.intrinsics_files[negative_idx]))
+
+        print("Focal lengths: ", focal_length_1, focal_length_2)
+
+        # Fake coordinates from depth maps (same shape as image)
+        fake_coords_1 = self._convert_depth_to_coords(fake_depth_1, pose_1, focal_length_1)
+        fake_coords_2 = self._convert_depth_to_coords(fake_depth_2, pose_2, focal_length_2)
+
+        print("Fake coords shapes: ", fake_coords_1.shape, fake_coords_2.shape)
+
+        # Real coordinates from initialization targets
+        # real_coords_1 = torch.load(self.real_coords_files[idx])
+        # real_coords_2 = torch.load(self.real_coords_files[negative_idx])
+        # print("Real coords shapes: ", real_coords_1.shape, real_coords_2.shape)
+        # TODO: how to handle subsampling? In dataset or in training loop?
+        
+        assert fake_coords_1.shape == fake_image_1.shape, f"Fake coords shape {fake_coords_1.shape} does not match image shape {fake_image_1.shape}"
+        assert fake_coords_2.shape == fake_image_2.shape, f"Fake coords shape {fake_coords_2.shape} does not match image shape {fake_image_2.shape}"
+        
+        # TODO: [IDEA] return as dictionary instead of tuple
+
+        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance
+        
     @staticmethod
     def _resize_image(image, target_height):
         aspect_ratio = image.shape[1] / image.shape[0]
@@ -196,7 +280,7 @@ class RealFakeDataset(Dataset):
     
     def _get_single_item(self, idx, image_height, angle=None):
         try:
-            real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance = self._load_image_set(idx)
+            real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance = self._load_image_set(idx)
         except Exception as e:
             logging.error(f"Error loading image trio at index {idx}: {str(e)}")
             raise
@@ -208,11 +292,23 @@ class RealFakeDataset(Dataset):
         mask_1 = self._resize_image(mask_1, image_height)
         mask_2 = self._resize_image(mask_2, image_height)
 
+        # NEW: resize coordinates to match image size
+        fake_coords_1 = F.interpolate(fake_coords_1.unsqueeze(0), size=(image_height, fake_image_1.shape[2])).squeeze(0)
+        fake_coords_2 = F.interpolate(fake_coords_2.unsqueeze(0), size=(image_height, fake_image_2.shape[2])).squeeze(0)
+
+        # NEW: convert to torch tensors
+        fake_coords_1 = torch.from_numpy(fake_coords_1).float()
+        fake_coords_2 = torch.from_numpy(fake_coords_2).float()
+
         real_image_1, real_image_2, fake_image_1, fake_image_2 = \
             self._crop_to_smallest([real_image_1, real_image_2, fake_image_1, fake_image_2])
 
         mask_1 = TF.center_crop(mask_1, (real_image_1.size[1], real_image_1.size[0]))
         mask_2 = TF.center_crop(mask_2, (real_image_1.size[1], real_image_1.size[0]))
+
+        # NEW: crop coordinates
+        fake_coords_1 = TF.center_crop(fake_coords_1, (real_image_1.size[1], real_image_1.size[0]))
+        fake_coords_2 = TF.center_crop(fake_coords_2, (real_image_1.size[1], real_image_1.size[0]))
 
         real_image_1 = self.image_transform_normalized(real_image_1)
         fake_image_1 = self.image_transform(fake_image_1)
@@ -236,12 +332,23 @@ class RealFakeDataset(Dataset):
             fake_image_2 = self._rotate_image(fake_image_2, angle, 1, 'reflect')
             mask_1 = self._rotate_image(mask_1, angle, 1, 'reflect')
             mask_2 = self._rotate_image(mask_2, angle, 1, 'reflect')
+
+            # NEW: rotate coordinates as well
+            fake_coords_1 = self._rotate_image(fake_coords_1, angle, 1, 'reflect')
+            fake_coords_2 = self._rotate_image(fake_coords_2, angle, 1, 'reflect')
+
         
         if self.use_half and torch.cuda.is_available():
             real_image_1 = real_image_1.half()
             real_image_2 = real_image_2.half()
             fake_image_1 = fake_image_1.half()
             fake_image_2 = fake_image_2.half()
+            mask_1 = mask_1.half()
+            mask_2 = mask_2.half()
+
+            # NEW: apply to coordinates
+            fake_coords_1 = fake_coords_1.half()
+            fake_coords_2 = fake_coords_2.half()
         
         mask_1 = mask_1 >= 0.25
         mask_2 = mask_2 >= 0.25
@@ -250,8 +357,12 @@ class RealFakeDataset(Dataset):
             f"Shape mismatch: real 1 {real_image_1.shape}, real 2 {real_image_2.shape}," \
             f"fake 1 {fake_image_1.shape}, fake 2 {fake_image_2.shape}," \
             f"mask 1 {mask_1.shape}, mask 2 {mask_2.shape}"
+        
+        assert fake_coords_1.shape == fake_coords_2.shape, f"Shape mismatch: fake coords 1 {fake_coords_1.shape}, fake coords 2 {fake_coords_2.shape}"
+
+        assert fake_coords_1.shape[1:] == fake_image_1.shape[1:], f"Shape mismatch: fake coords 1 {fake_coords_1.shape}, fake image 1 {fake_image_1.shape}"
             
-        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance
+        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance
 
     def __getitem__(self, idx):
         if self.augment:
@@ -274,7 +385,7 @@ def custom_collate(batch):
     """
     Custom collate function for DataLoader that randomly pads images to the same size.
     """
-    real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, distances = zip(*batch)
+    real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, distances = zip(*batch)
 
     # Find max dimensions
     max_height = max([img.shape[1] for img in real_images_1])
@@ -305,10 +416,14 @@ def custom_collate(batch):
         mask_1_padded = pad_tensor(masks_1[i].float(), l_pad, r_pad, t_pad, b_pad).bool()
         mask_2_padded = pad_tensor(masks_2[i].float(), l_pad, r_pad, t_pad, b_pad).bool()
 
-        padded_images.append((real_image_1_padded, real_image_2_padded, fake_image_1_padded, fake_image_2_padded, mask_1_padded, mask_2_padded))
+        # NEW: pad coordinates
+        fake_coords_1_padded = pad_tensor(fake_coords_1[i], l_pad, r_pad, t_pad, b_pad)
+        fake_coords_2_padded = pad_tensor(fake_coords_2[i], l_pad, r_pad, t_pad, b_pad)
+
+        padded_images.append((real_image_1_padded, real_image_2_padded, fake_image_1_padded, fake_image_2_padded, mask_1_padded, mask_2_padded, fake_coords_1_padded, fake_coords_2_padded))
 
     # Unzip the padded images
-    real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded = zip(*padded_images)
+    real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded = zip(*padded_images)
 
     # Stack the padded images
     real_images_1_padded = torch.stack(real_images_1_padded)
@@ -317,13 +432,17 @@ def custom_collate(batch):
     fake_images_2_padded = torch.stack(fake_images_2_padded)
     masks_1_padded = torch.stack(masks_1_padded)
     masks_2_padded = torch.stack(masks_2_padded)
+    fake_coords_1_padded = torch.stack(fake_coords_1_padded)
+    fake_coords_2_padded = torch.stack(fake_coords_2_padded)
 
     assert real_images_1_padded.shape == real_images_2_padded.shape == fake_images_1_padded.shape == fake_images_2_padded.shape == masks_1_padded.shape == masks_2_padded.shape, \
         f"Shape mismatch: real 1 {real_images_1_padded.shape}, real 2 {real_images_2_padded.shape}," \
             f"fake 1 {fake_images_1_padded.shape}, fake 2 {fake_images_2_padded.shape}," \
             f"mask 1 {masks_1_padded.shape}, mask 2 {masks_2_padded.shape}"
+    
+    assert fake_coords_1_padded.shape[1:] == fake_images_1_padded.shape[1:], f"Shape mismatch: fake coords 1 {fake_coords_1_padded.shape}, fake image 1 {fake_images_1_padded.shape}"
 
-    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, distances
+    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, distances
 
 
 if __name__ == '__main__':
@@ -336,6 +455,19 @@ if __name__ == '__main__':
     data_path = "/home/johndoe/Documents/data/Transfer Learning/"
     dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
 
+    def coords_to_colors(coords):
+        # 1. Convert coords to numpy array
+        coords = coords.numpy()
+
+        # 2. Mask out zero values in coords
+        coords = np.ma.masked_array(coords, axis=0, mask=(np.all(coords == [0., 0., 0.], axis=0)))
+
+        # 3. Normalize coords to [0, 1]
+        min_coords, max_coords = np.floor(np.min(coords, axis=(1, 2))), np.ceil(np.max(coords, axis=(1, 2)))
+        coords = (coords - min_coords) / (max_coords - min_coords)
+
+        return coords
+
     for dataset_name in dataset_names:
         dataset = RealFakeDataset(data_path + dataset_name, augment=True, augment_color=True)
         
@@ -343,12 +475,16 @@ if __name__ == '__main__':
         idx = random.sample(range(len(dataset)), 4)
         batch = dataset[idx]
 
-        fig, ax = plt.subplots(4, 7)
+        fig, ax = plt.subplots(4, 8)
 
         for i, sample in enumerate(batch):
-            real_1, real_2, fake_1, fake_2, mask_1, mask_2, distance = sample
+            real_1, real_2, fake_1, fake_2, mask_1, mask_2, fake_coords_1, fake_coords_2, distance = sample
 
             combined_mask = torch.logical_and(mask_1, mask_2)
+
+            coords_1 = coords_to_colors(fake_coords_1)
+            coords_2 = coords_to_colors(fake_coords_2)
+
 
             ax[i, 0].imshow(real_1[0], cmap='gray')
             ax[i, 1].imshow(real_2[0], cmap='gray')
@@ -356,18 +492,23 @@ if __name__ == '__main__':
             ax[i, 3].imshow(fake_2[0], cmap='gray')
             ax[i, 4].imshow(mask_1[0], cmap='gray')
             ax[i, 5].imshow(mask_2[0], cmap='gray')
-            ax[i, 6].imshow(combined_mask[0], cmap='gray')
+
+            # NEW: show scene coordinates in 3D as RGB image
+            ax[i, 6].imshow(coords_1, cmap='viridis')
+            ax[i, 7].imshow(coords_2, cmap='viridis')
+
+            # ax[i, 6].imshow(combined_mask[0], cmap='gray')
         
         plt.show()
 
 
         batch = custom_collate(batch)
 
-        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, distances = batch
+        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, distances = batch
 
         combined_masks = torch.logical_and(masks_1, masks_2)
 
-        fig, ax = plt.subplots(4, 7)
+        fig, ax = plt.subplots(4, 8)
 
         for i in range(4):
             ax[i, 0].imshow(real_images_1[i][0], cmap='gray')
@@ -376,6 +517,11 @@ if __name__ == '__main__':
             ax[i, 3].imshow(fake_images_2[i][0], cmap='gray')
             ax[i, 4].imshow(masks_1[i][0], cmap='gray')
             ax[i, 5].imshow(masks_2[i][0], cmap='gray')
-            ax[i, 6].imshow(combined_masks[i][0], cmap='gray')
+
+            # NEW: show scene coordinates in 3D as RGB image
+            ax[i, 6].imshow(coords_to_colors(fake_coords_1[i]), cmap='viridis')
+            ax[i, 7].imshow(coords_to_colors(fake_coords_2[i]), cmap='viridis')
+
+            # ax[i, 6].imshow(combined_masks[i][0], cmap='gray')
 
         plt.show()
