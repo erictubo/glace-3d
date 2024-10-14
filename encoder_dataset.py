@@ -162,10 +162,8 @@ class RealFakeDataset(Dataset):
         if mm_to_m:
             depth = depth / 1000
 
-        # no subsampling, only conversion from depth to 3D coordinates
-
         # create ndarray with xy values
-        xy = np.zeros(2, depth.shape[0], depth.shape[1])
+        xy = np.zeros((2, depth.shape[0], depth.shape[1]))
         for y in range(depth.shape[0]):
             for x in range(depth.shape[1]):
                 xy[:, y, x] = [x, y]
@@ -183,14 +181,14 @@ class RealFakeDataset(Dataset):
         eye[2] = depth
         eye[3] = 1
 
-        coords = np.matmul(pose.numpy(), eye.reshape(4, -1))
+        coords = np.matmul(pose, eye.reshape(4, -1))
         coords = coords.reshape(4, depth.shape[0], depth.shape[1])
 
         # set pixels with invalid depth to zero
         coords[:, depth == 0] = 0
         coords[:, depth > 1000] = 0
         
-        return coords[:3] # shape: (3, height, width)
+        return coords[:3].transpose(1, 2, 0) # shape (H, W, 3)
     
     def _load_image_set(self, idx):
         real_image_1 = io.imread(self.real_rgb_files[idx])
@@ -228,13 +226,9 @@ class RealFakeDataset(Dataset):
         focal_length_1 = float(np.loadtxt(self.intrinsics_files[idx]))
         focal_length_2 = float(np.loadtxt(self.intrinsics_files[negative_idx]))
 
-        print("Focal lengths: ", focal_length_1, focal_length_2)
-
         # Fake coordinates from depth maps (same shape as image)
         fake_coords_1 = self._convert_depth_to_coords(fake_depth_1, pose_1, focal_length_1)
         fake_coords_2 = self._convert_depth_to_coords(fake_depth_2, pose_2, focal_length_2)
-
-        print("Fake coords shapes: ", fake_coords_1.shape, fake_coords_2.shape)
 
         # Real coordinates from initialization targets
         # real_coords_1 = torch.load(self.real_coords_files[idx])
@@ -292,13 +286,11 @@ class RealFakeDataset(Dataset):
         mask_1 = self._resize_image(mask_1, image_height)
         mask_2 = self._resize_image(mask_2, image_height)
 
-        # NEW: resize coordinates to match image size
-        fake_coords_1 = F.interpolate(fake_coords_1.unsqueeze(0), size=(image_height, fake_image_1.shape[2])).squeeze(0)
-        fake_coords_2 = F.interpolate(fake_coords_2.unsqueeze(0), size=(image_height, fake_image_2.shape[2])).squeeze(0)
+        fake_coords_1 = torch.from_numpy(fake_coords_1).float().permute(2, 0, 1)
+        fake_coords_2 = torch.from_numpy(fake_coords_2).float().permute(2, 0, 1)
 
-        # NEW: convert to torch tensors
-        fake_coords_1 = torch.from_numpy(fake_coords_1).float()
-        fake_coords_2 = torch.from_numpy(fake_coords_2).float()
+        fake_coords_1 = F.interpolate(fake_coords_1.unsqueeze(0), size=(image_height, real_image_1.size[0])).squeeze(0)
+        fake_coords_2 = F.interpolate(fake_coords_2.unsqueeze(0), size=(image_height, real_image_2.size[0])).squeeze(0)
 
         real_image_1, real_image_2, fake_image_1, fake_image_2 = \
             self._crop_to_smallest([real_image_1, real_image_2, fake_image_1, fake_image_2])
@@ -306,7 +298,6 @@ class RealFakeDataset(Dataset):
         mask_1 = TF.center_crop(mask_1, (real_image_1.size[1], real_image_1.size[0]))
         mask_2 = TF.center_crop(mask_2, (real_image_1.size[1], real_image_1.size[0]))
 
-        # NEW: crop coordinates
         fake_coords_1 = TF.center_crop(fake_coords_1, (real_image_1.size[1], real_image_1.size[0]))
         fake_coords_2 = TF.center_crop(fake_coords_2, (real_image_1.size[1], real_image_1.size[0]))
 
@@ -332,23 +323,20 @@ class RealFakeDataset(Dataset):
             fake_image_2 = self._rotate_image(fake_image_2, angle, 1, 'reflect')
             mask_1 = self._rotate_image(mask_1, angle, 1, 'reflect')
             mask_2 = self._rotate_image(mask_2, angle, 1, 'reflect')
-
-            # NEW: rotate coordinates as well
             fake_coords_1 = self._rotate_image(fake_coords_1, angle, 1, 'reflect')
             fake_coords_2 = self._rotate_image(fake_coords_2, angle, 1, 'reflect')
-
         
         if self.use_half and torch.cuda.is_available():
-            real_image_1 = real_image_1.half()
-            real_image_2 = real_image_2.half()
-            fake_image_1 = fake_image_1.half()
-            fake_image_2 = fake_image_2.half()
-            mask_1 = mask_1.half()
-            mask_2 = mask_2.half()
+            # real_image_1 = real_image_1.half()
+            # real_image_2 = real_image_2.half()
+            # fake_image_1 = fake_image_1.half()
+            # fake_image_2 = fake_image_2.half()
+            # mask_1 = mask_1.half()
+            # mask_2 = mask_2.half()
+            # fake_coords_1 = fake_coords_1.half()
+            # fake_coords_2 = fake_coords_2.half()
 
-            # NEW: apply to coordinates
-            fake_coords_1 = fake_coords_1.half()
-            fake_coords_2 = fake_coords_2.half()
+            pass
         
         mask_1 = mask_1 >= 0.25
         mask_2 = mask_2 >= 0.25
@@ -440,7 +428,7 @@ def custom_collate(batch):
             f"fake 1 {fake_images_1_padded.shape}, fake 2 {fake_images_2_padded.shape}," \
             f"mask 1 {masks_1_padded.shape}, mask 2 {masks_2_padded.shape}"
     
-    assert fake_coords_1_padded.shape[1:] == fake_images_1_padded.shape[1:], f"Shape mismatch: fake coords 1 {fake_coords_1_padded.shape}, fake image 1 {fake_images_1_padded.shape}"
+    assert fake_coords_1_padded.shape[2:] == fake_images_1_padded.shape[2:], f"Shape mismatch: fake coords 1 {fake_coords_1_padded.shape}, fake image 1 {fake_images_1_padded.shape}"
 
     return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, distances
 
@@ -457,16 +445,20 @@ if __name__ == '__main__':
 
     def coords_to_colors(coords):
         # 1. Convert coords to numpy array
-        coords = coords.numpy()
+        coords = coords.permute(1, 2, 0).numpy()
 
         # 2. Mask out zero values in coords
-        coords = np.ma.masked_array(coords, axis=0, mask=(np.all(coords == [0., 0., 0.], axis=0)))
+        mask = np.all(coords == [0., 0., 0.], axis=-1)
+        masked_coords = np.ma.masked_array(coords, mask=np.repeat(mask[:, :, np.newaxis], 3, axis=2))
 
         # 3. Normalize coords to [0, 1]
-        min_coords, max_coords = np.floor(np.min(coords, axis=(1, 2))), np.ceil(np.max(coords, axis=(1, 2)))
-        coords = (coords - min_coords) / (max_coords - min_coords)
+        min_coords = np.floor(masked_coords.min(axis=(0, 1)))
+        max_coords = np.ceil(masked_coords.max(axis=(0, 1)))
+        normalized_coords = (masked_coords - min_coords) / (max_coords - min_coords)
 
-        return coords
+        normalized_coords = np.where(mask[:, :, np.newaxis], 1, normalized_coords)
+
+        return normalized_coords.astype(np.float32)
 
     for dataset_name in dataset_names:
         dataset = RealFakeDataset(data_path + dataset_name, augment=True, augment_color=True)
@@ -482,20 +474,14 @@ if __name__ == '__main__':
 
             combined_mask = torch.logical_and(mask_1, mask_2)
 
-            coords_1 = coords_to_colors(fake_coords_1)
-            coords_2 = coords_to_colors(fake_coords_2)
-
-
             ax[i, 0].imshow(real_1[0], cmap='gray')
             ax[i, 1].imshow(real_2[0], cmap='gray')
             ax[i, 2].imshow(fake_1[0], cmap='gray')
             ax[i, 3].imshow(fake_2[0], cmap='gray')
             ax[i, 4].imshow(mask_1[0], cmap='gray')
             ax[i, 5].imshow(mask_2[0], cmap='gray')
-
-            # NEW: show scene coordinates in 3D as RGB image
-            ax[i, 6].imshow(coords_1, cmap='viridis')
-            ax[i, 7].imshow(coords_2, cmap='viridis')
+            ax[i, 6].imshow(coords_to_colors(fake_coords_1), cmap='viridis')
+            ax[i, 7].imshow(coords_to_colors(fake_coords_2), cmap='viridis')
 
             # ax[i, 6].imshow(combined_mask[0], cmap='gray')
         
@@ -517,8 +503,6 @@ if __name__ == '__main__':
             ax[i, 3].imshow(fake_images_2[i][0], cmap='gray')
             ax[i, 4].imshow(masks_1[i][0], cmap='gray')
             ax[i, 5].imshow(masks_2[i][0], cmap='gray')
-
-            # NEW: show scene coordinates in 3D as RGB image
             ax[i, 6].imshow(coords_to_colors(fake_coords_1[i]), cmap='viridis')
             ax[i, 7].imshow(coords_to_colors(fake_coords_2[i]), cmap='viridis')
 
