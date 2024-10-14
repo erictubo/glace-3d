@@ -14,6 +14,10 @@ from skimage.transform import rotate
 
 
 class RealFakeDataset(Dataset):
+    """
+    Dataset class for loading corresponding real and fake image pairs,
+    along with a distinct negative pair and a foreground mask for each fake image.
+    """
     def __init__(
             self,
             root_dir,
@@ -127,6 +131,10 @@ class RealFakeDataset(Dataset):
         return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance
 
     def _get_negative_sample(self, idx, pose, is_landscape):
+        """
+        Find a sample that is farthest from the current sample in terms of distance,
+        out of a random selection of samples that have the same aspect ratio.
+        """
 
         random.seed(idx + self.epoch * len(self))
 
@@ -173,8 +181,7 @@ class RealFakeDataset(Dataset):
         for img in images:
             left = (img.size[0] - min_width) // 2
             top = (img.size[1] - min_height) // 2
-            right = left + min_width
-            bottom = top + min_height
+            
             cropped_images.append(TF.crop(img, top, left, min_height, min_width))
         
         return cropped_images
@@ -236,7 +243,7 @@ class RealFakeDataset(Dataset):
             fake_image_1 = fake_image_1.half()
             fake_image_2 = fake_image_2.half()
         
-        mask_1 = mask_1 > 0.25
+        mask_1 = mask_1 >= 0.25
         mask_2 = mask_2 >= 0.25
         
         assert real_image_1.shape == real_image_2.shape == fake_image_1.shape == fake_image_2.shape == mask_1.shape == mask_2.shape, \
@@ -253,8 +260,8 @@ class RealFakeDataset(Dataset):
         else:
             scale_factor = 1
 
-        image_height = int(self.image_height * scale_factor)
-        # angle = random.uniform(-self.aug_rotation, self.aug_rotation)
+        image_height = int(self.image_height * scale_factor) # same height across batch
+        # angle = random.uniform(-self.aug_rotation, self.aug_rotation) # same angle across batch
 
         if isinstance(idx, list):
             tensors = [self._get_single_item(i, image_height, angle=None) for i in idx]
@@ -264,6 +271,9 @@ class RealFakeDataset(Dataset):
 
 
 def custom_collate(batch):
+    """
+    Custom collate function for DataLoader that randomly pads images to the same size.
+    """
     real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, distances = zip(*batch)
 
     # Find max dimensions
@@ -317,6 +327,9 @@ def custom_collate(batch):
 
 
 if __name__ == '__main__':
+
+    # Testing & Visualization:
+
     #logging.basicConfig(level=logging.DEBUG)
     import matplotlib.pyplot as plt
 
