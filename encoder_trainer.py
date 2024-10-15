@@ -89,9 +89,12 @@ class TrainerEncoder:
         for dataset_name, head_path in self.options.head_paths.items():
             head_state_dict = torch.load(head_path, map_location="cpu")
             self.heads[dataset_name] = Head.create_from_state_dict(head_state_dict)
+            self.heads[dataset_name].to(self.device)
 
             for param in self.heads[dataset_name].parameters():
                 param.requires_grad = False
+        
+            _logger.info(f"Loaded prediction head for {dataset_name} from: {head_path}")
 
         # Dataset
         self.val_dataset, self.train_dataset, weights = self._load_datasets()
@@ -304,6 +307,8 @@ class TrainerEncoder:
             mask_2 = mask_2.to(self.device)
             coords_1 = coords_1.to(self.device)
             coords_2 = coords_2.to(self.device)
+            glob_1 = glob_1.to(self.device)
+            glob_2 = glob_2.to(self.device)
 
             loss, loss_dict = self._compute_loss(
                 real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode='training')
@@ -396,6 +401,8 @@ class TrainerEncoder:
                 mask_2 = mask_2.to(self.device)
                 coords_1 = coords_1.to(self.device)
                 coords_2 = coords_2.to(self.device)
+                glob_1 = glob_1.to(self.device)
+                glob_2 = glob_2.to(self.device)
 
                 loss, loss_dict = self._compute_loss(
                     real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name,  mode='validation')
@@ -517,7 +524,7 @@ class TrainerEncoder:
     #     return losses.mean()
 
     @staticmethod
-    def _resize_coords_to_features(coords, features_shape, visualize=True):
+    def _resize_coords_to_features(coords, features_shape, visualize=False):
         """
         Resize coordinates to the same size as features, subsampling to each patch.
         Input: coords (shape Bx3xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
@@ -540,7 +547,7 @@ class TrainerEncoder:
                 print('...')
             plt.show()
 
-        return
+        return feature_coords
     
     @staticmethod
     def _resize_mask_to_features(image_mask, features_shape, threshold=0.25, visualize=False):
@@ -569,6 +576,8 @@ class TrainerEncoder:
         assert feature_mask.sum() != 0, "mask_1 is invalid everywhere!"
 
         return feature_mask
+    
+    # TODO: separate functions for visualization of coordinates & masks
     
     @staticmethod
     def _mask_features(features_list, feature_mask):
@@ -621,6 +630,21 @@ class TrainerEncoder:
         assert(len(valid_features_list) == len(features_list))
 
         return valid_features_list, M
+    
+    # def compute_3d_norm(tensor1, tensor2):
+    #     # Ensure the tensors have the same shape
+    #     assert tensor1.shape == tensor2.shape, "Tensors must have the same shape"
+        
+    #     # Compute the difference
+    #     diff = tensor1 - tensor2
+        
+    #     # Compute the squared norm along the coordinate dimension (dim=1)
+    #     squared_norm = torch.sum(diff**2, dim=1)
+        
+    #     # Take the square root to get the Euclidean norm
+    #     norm = torch.sqrt(squared_norm)
+        
+    #     return norm
 
 
     def _compute_separate_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode):
@@ -648,39 +672,64 @@ class TrainerEncoder:
 
 
             # SCENE COORDINATES
-            print(f'Coords: {coords_1.shape}, {coords_2.shape}')
             gt_coords_1 = self._resize_coords_to_features(coords_1, fake_features_1.shape)
             gt_coords_2 = self._resize_coords_to_features(coords_2, fake_features_2.shape)
 
-            # Get global features as input to the head
-            print(f'Glob: {glob_1.shape}, {glob_2.shape}')
-            glob_local_features_1 = torch.cat((glob_1[...,None,None].expand(-1, -1, fake_features_1.shape[2], fake_features_1.shape[3]), fake_features_1), dim=1)
-            glob_local_features_2 = torch.cat((glob_2[...,None,None].expand(-1, -1, fake_features_2.shape[2], fake_features_2.shape[3]), fake_features_2), dim=1)
-            
-            print(f'Glob+Local: {glob_local_features_1.shape}, {glob_local_features_2.shape}')
+            glob_features_1 = glob_1[..., None, None].expand(-1, -1, fake_features_1.shape[2], fake_features_1.shape[3])
+            glob_features_2 = glob_2[..., None, None].expand(-1, -1, fake_features_2.shape[2], fake_features_2.shape[3])
 
-            # Predict scene coordinates using the head
-            pred_coords_1 = self.heads[dataset_name](glob_local_features_1)
-            pred_coords_2 = self.heads[dataset_name](glob_local_features_2)
+            glob_local_features_1 = torch.cat((glob_features_1, fake_features_1), dim=1)
+            glob_local_features_2 = torch.cat((glob_features_2, fake_features_2), dim=1)
             
-            print(f'Pred: {pred_coords_1.shape}, {pred_coords_2.shape}')
+            with autocast(enabled=self.options.use_half):
+
+                pred_coords_1 = self.heads[dataset_name](glob_local_features_1)
+                pred_coords_2 = self.heads[dataset_name](glob_local_features_2)
 
             assert pred_coords_1.shape == gt_coords_1.shape, f"{pred_coords_1.shape} != {gt_coords_1.shape}"
             assert pred_coords_2.shape == gt_coords_2.shape, f"{pred_coords_2.shape} != {gt_coords_2.shape}"
 
-            # TODO: compute loss for scene coordinates: 3D distance between gt_coords and pred_coords
-            
-            valid_coords_1 = gt_coords_1.sum(dim=1) != 0
-            valid_coords_2 = gt_coords_2.sum(dim=1) != 0
 
-            distance_1 = torch.norm(gt_coords_1[valid_coords_1] - pred_coords_1[valid_coords_1], p=2, dim=1)
-            distance_2 = torch.norm(gt_coords_2[valid_coords_2] - pred_coords_2[valid_coords_2], p=2, dim=1)
+            valid_coords_1 = (gt_coords_1.sum(dim=1) != 0)
+            valid_coords_2 = (gt_coords_2.sum(dim=1) != 0)
 
-            coords_loss = 0.5 * (distance_1.mean() + distance_2.mean())
+            distance_1 = torch.norm(gt_coords_1 - pred_coords_1, p=2, dim=1)
+            distance_2 = torch.norm(gt_coords_2 - pred_coords_2, p=2, dim=1)
 
-            print(f'Coords loss: {coords_loss.item()}')
+            distance_1_valid = distance_1[valid_coords_1]
+            distance_2_valid = distance_2[valid_coords_2]
 
-            # NEXT: backpropagate coords_loss to update the encoder (fixed head)
+            V1 = distance_1_valid.size(0)
+            V2 = distance_2_valid.size(0)
+
+            coords_loss = (V1 * distance_1_valid.mean() + V2 * distance_2_valid.mean()) / (V1 + V2)
+
+            print(f'Coords loss: {round(coords_loss.item(), 2)}')
+
+            def visualize_coords():
+
+                difference_1 = distance_1.cpu().numpy()
+                difference_2 = distance_2.cpu().numpy()
+                valid_1 = valid_coords_1.cpu().numpy()
+                valid_2 = valid_coords_2.cpu().numpy()
+                masked_difference_1 = np.ma.masked_array(difference_1, mask=~valid_1)
+                masked_difference_2 = np.ma.masked_array(difference_2, mask=~valid_2)
+
+                import matplotlib.pyplot as plt
+                from encoder_dataset import coords_to_colors
+
+                cmap = plt.get_cmap('Spectral').reversed()
+                cmap.set_bad(color='white')
+                fig, ax = plt.subplots(self.options.batch_size, 6)
+                for i in range(self.options.batch_size):
+                    ax[i, 0].imshow(coords_to_colors(gt_coords_1[i].cpu()))
+                    ax[i, 1].imshow(coords_to_colors(pred_coords_1[i].cpu()))
+                    ax[i, 2].imshow(masked_difference_1[i], cmap=cmap)
+                    ax[i, 3].imshow(coords_to_colors(gt_coords_2[i].cpu()))
+                    ax[i, 4].imshow(coords_to_colors(pred_coords_2[i].cpu()))
+                    ax[i, 5].imshow(masked_difference_2[i], cmap=cmap)
+                    print('...')
+                plt.show()
 
 
             # MASKING
@@ -717,13 +766,17 @@ class TrainerEncoder:
             # Track
             cosine_real_1_init_vs_real_2_init = self._cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
 
-            a, b = self.options.contrastive_weights
+            # a, b = self.options.contrastive_weights
 
-            loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
+            # loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
 
-            loss += magnitude
+            # loss += magnitude
+
+            loss = coords_loss
 
             loss_dict = {
+                'F_3D' : coords_loss.item(),
+
                 'F-Ri_cos': cosine_fake_vs_real_init.item(),
                 'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
                 'R1i-R2i_cos': cosine_real_1_init_vs_real_2_init.item(),
@@ -842,12 +895,12 @@ if __name__ == "__main__":
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
-            self.dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
+            self.dataset_names = ['notre dame', 'pantheon'] #, 'brandenburg gate']
 
             self.head_paths = {
                 'notre dame': 'output/notre_dame.pt',
-                'brandenburg gate': 'output/brandenburg_gate.pt',
                 'pantheon': 'output/pantheon.pt',
+                #'brandenburg gate': 'output/brandenburg_gate.pt',
             }
 
             self.iter_val_limit = 20 # number of samples for each validation
@@ -874,46 +927,46 @@ if __name__ == "__main__":
     options = Options()
 
 
-    # # Test
-    # options.loss_function = 'separate'
-    # options.val_dataset_name = 'brandenburg gate'
-    # options.contrastive_weights = (0.6, 0.4)
-    # options.experiment_name = "test"
-    # options.output_path = f"output_encoder/{options.experiment_name}"
+    # Test
+    options.loss_function = 'separate'
+    options.val_dataset_name = 'pantheon' # 'brandenburg gate'
+    options.contrastive_weights = (0.0, 0.0)
+    options.experiment_name = "test-coords"
+    options.output_path = f"output_encoder/{options.experiment_name}"
 
-    # print(f'Training {options.experiment_name}')
-    # trainer = TrainerEncoder(options)
-    # val_loss = trainer.train()
+    print(f'Training {options.experiment_name}')
+    trainer = TrainerEncoder(options)
+    val_loss = trainer.train()
 
 
     # Validation
 
-    for options.val_dataset_name in options.dataset_names:
+    # for options.val_dataset_name in options.dataset_names:
 
-        options.loss_function = 'separate'
+    #     options.loss_function = 'separate'
 
-        for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
+    #     for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
 
-            w1, w2 = options.contrastive_weights
-            options.experiment_name = f"val_separate_w{w1}_{w2}_{options.val_dataset_name}"
-            options.output_path = f"output_encoder/{options.experiment_name}"
+    #         w1, w2 = options.contrastive_weights
+    #         options.experiment_name = f"val_separate_w{w1}_{w2}_{options.val_dataset_name}"
+    #         options.output_path = f"output_encoder/{options.experiment_name}"
 
-            print(f'Training {options.experiment_name}')
-            trainer = TrainerEncoder(options)
-            val_loss = trainer.train()
-
-
-        options.loss_function = 'combined'
-
-        for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
-
-            w1, w2, w3 = options.contrastive_weights
-            options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.val_dataset_name}"
-            options.output_path = f"output_encoder/{options.experiment_name}"
-
-            print(f'Training {options.experiment_name}')
-            trainer = TrainerEncoder(options)
-            val_loss = trainer.train()
+    #         print(f'Training {options.experiment_name}')
+    #         trainer = TrainerEncoder(options)
+    #         val_loss = trainer.train()
 
 
-    print('Finished')
+    #     options.loss_function = 'combined'
+
+    #     for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
+
+    #         w1, w2, w3 = options.contrastive_weights
+    #         options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.val_dataset_name}"
+    #         options.output_path = f"output_encoder/{options.experiment_name}"
+
+    #         print(f'Training {options.experiment_name}')
+    #         trainer = TrainerEncoder(options)
+    #         val_loss = trainer.train()
+
+
+    # print('Finished')
