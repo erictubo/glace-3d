@@ -702,7 +702,11 @@ class TrainerEncoder:
             V1 = distance_1_valid.size(0)
             V2 = distance_2_valid.size(0)
 
-            coords_loss = (V1 * distance_1_valid.mean() + V2 * distance_2_valid.mean()) / (V1 + V2)
+            # IDEA: Median instead of mean to ignore outliers
+
+            coords_loss = (V1 * distance_1_valid.median() + V2 * distance_2_valid.median()) / (V1 + V2)
+
+            # coords_loss = (V1 * distance_1_valid.mean() + V2 * distance_2_valid.mean()) / (V1 + V2)
 
             print(f'Coords loss: {round(coords_loss.item(), 2)}')
 
@@ -770,9 +774,9 @@ class TrainerEncoder:
 
             # loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
 
-            # loss += magnitude
+            loss = coords_loss / 50
 
-            loss = coords_loss
+            loss += magnitude
 
             loss_dict = {
                 'F_3D' : coords_loss.item(),
@@ -931,7 +935,7 @@ if __name__ == "__main__":
     options.loss_function = 'separate'
     options.val_dataset_name = 'pantheon' # 'brandenburg gate'
     options.contrastive_weights = (0.0, 0.0)
-    options.experiment_name = "test-coords"
+    options.experiment_name = "3d-median"
     options.output_path = f"output_encoder/{options.experiment_name}"
 
     print(f'Training {options.experiment_name}')
@@ -970,3 +974,8 @@ if __name__ == "__main__":
 
 
     # print('Finished')
+
+
+    # TODO: make sure CUDA doesn't run out of memory
+
+    # TODO: check that the prediction head is not updated
