@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 
 
-from ace_network import Encoder
+from ace_network import Encoder, Head
 from encoder_dataset import RealFakeDataset, custom_collate
 
 _logger = logging.getLogger(__name__)
@@ -84,6 +84,14 @@ class TrainerEncoder:
         for param in self.initial_encoder.parameters():
             param.requires_grad = False
 
+        # Create head for each dataset
+        self.heads = {}
+        for dataset_name, head_path in self.options.head_paths.items():
+            head_state_dict = torch.load(head_path, map_location="cpu")
+            self.heads[dataset_name] = Head.create_from_state_dict(head_state_dict)
+
+            for param in self.heads[dataset_name].parameters():
+                param.requires_grad = False
 
         # Dataset
         self.val_dataset, self.train_dataset, weights = self._load_datasets()
@@ -184,6 +192,7 @@ class TrainerEncoder:
             if dataset_name == self.options.val_dataset_name:
                 val_dataset = RealFakeDataset(
                     root_dir=dataset_path,
+                    name = dataset_name,
                     augment=False,
                     use_half=self.options.use_half,
                     image_height=self.options.image_height,
@@ -191,6 +200,7 @@ class TrainerEncoder:
             else:
                 train_datasets.append(RealFakeDataset(
                     root_dir=dataset_path,
+                    name = dataset_name,
                     augment=True,
                     augment_color=True,
                     use_half=self.options.use_half,
@@ -282,7 +292,7 @@ class TrainerEncoder:
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance in self.train_loader:
+        for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name in self.train_loader:
 
             self.iteration += 1
 
@@ -292,8 +302,11 @@ class TrainerEncoder:
             fake_image_2 = fake_image_2.to(self.device)
             mask_1 = mask_1.to(self.device)
             mask_2 = mask_2.to(self.device)
+            coords_1 = coords_1.to(self.device)
+            coords_2 = coords_2.to(self.device)
 
-            loss, loss_dict = self._compute_loss(real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode='training')
+            loss, loss_dict = self._compute_loss(
+                real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode='training')
             accumulated_loss += loss
             total_loss += loss.item()
 
@@ -370,7 +383,7 @@ class TrainerEncoder:
         val_loader = self.get_random_validation_subset(n_samples)
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, distance in val_loader:
+            for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name in val_loader:
                 
                 val_iteration += 1
                 _logger.info(f'{val_iteration} / {len(val_loader)} ...')
@@ -381,8 +394,11 @@ class TrainerEncoder:
                 fake_image_2 = fake_image_2.to(self.device)
                 mask_1 = mask_1.to(self.device)
                 mask_2 = mask_2.to(self.device)
+                coords_1 = coords_1.to(self.device)
+                coords_2 = coords_2.to(self.device)
 
-                loss, loss_dict = self._compute_loss(real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode='validation')
+                loss, loss_dict = self._compute_loss(
+                    real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name,  mode='validation')
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -499,6 +515,32 @@ class TrainerEncoder:
     #     losses = F.relu(distance_positive - distance_negative + margin)
 
     #     return losses.mean()
+
+    @staticmethod
+    def _resize_coords_to_features(coords, features_shape, visualize=True):
+        """
+        Resize coordinates to the same size as features, subsampling to each patch.
+        Input: coords (shape Bx3xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
+        Output: feature_coords (shape Bx3xHxW)
+        """
+            
+        B, C, H, W = features_shape
+
+        feature_coords = F.interpolate(coords, size=[H, W], mode='nearest')
+
+        assert feature_coords.shape == (B, 3, H, W), feature_coords.shape
+
+        if visualize:
+            import matplotlib.pyplot as plt
+            from encoder_dataset import coords_to_colors
+            fig, ax = plt.subplots(2, 4)
+            for i in range(B):
+                ax[0, i].imshow(coords_to_colors(coords[i].cpu()))
+                ax[1, i].imshow(coords_to_colors(feature_coords[i].cpu()))
+                print('...')
+            plt.show()
+
+        return
     
     @staticmethod
     def _resize_mask_to_features(image_mask, features_shape, threshold=0.25, visualize=False):
@@ -513,8 +555,9 @@ class TrainerEncoder:
         feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
         feature_mask = (feature_mask >= threshold).bool()
 
+        assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
+
         if visualize:
-            print(image_mask.shape, "->", feature_mask.shape)
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(2, 4)
             for i in range(B):
@@ -522,8 +565,6 @@ class TrainerEncoder:
                 ax[1, i].imshow(feature_mask[i][0].cpu(), cmap='gray')
                 print('...')
             plt.show()
-
-        assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
         assert feature_mask.sum() != 0, "mask_1 is invalid everywhere!"
 
@@ -582,7 +623,7 @@ class TrainerEncoder:
         return valid_features_list, M
 
 
-    def _compute_separate_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode):
+    def _compute_separate_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode):
         """
         Loss for training a separate encoder:
         A) make fake_features similar to real_init_features (real_vs_fake),
@@ -604,6 +645,43 @@ class TrainerEncoder:
 
                 fake_features_1 = self.encoder(fake_image_1)
                 fake_features_2 = self.encoder(fake_image_2)
+
+
+            # SCENE COORDINATES
+            print(f'Coords: {coords_1.shape}, {coords_2.shape}')
+            gt_coords_1 = self._resize_coords_to_features(coords_1, fake_features_1.shape)
+            gt_coords_2 = self._resize_coords_to_features(coords_2, fake_features_2.shape)
+
+            # Get global features as input to the head
+            print(f'Glob: {glob_1.shape}, {glob_2.shape}')
+            glob_local_features_1 = torch.cat((glob_1[...,None,None].expand(-1, -1, fake_features_1.shape[2], fake_features_1.shape[3]), fake_features_1), dim=1)
+            glob_local_features_2 = torch.cat((glob_2[...,None,None].expand(-1, -1, fake_features_2.shape[2], fake_features_2.shape[3]), fake_features_2), dim=1)
+            
+            print(f'Glob+Local: {glob_local_features_1.shape}, {glob_local_features_2.shape}')
+
+            # Predict scene coordinates using the head
+            pred_coords_1 = self.heads[dataset_name](glob_local_features_1)
+            pred_coords_2 = self.heads[dataset_name](glob_local_features_2)
+            
+            print(f'Pred: {pred_coords_1.shape}, {pred_coords_2.shape}')
+
+            assert pred_coords_1.shape == gt_coords_1.shape, f"{pred_coords_1.shape} != {gt_coords_1.shape}"
+            assert pred_coords_2.shape == gt_coords_2.shape, f"{pred_coords_2.shape} != {gt_coords_2.shape}"
+
+            # TODO: compute loss for scene coordinates: 3D distance between gt_coords and pred_coords
+            
+            valid_coords_1 = gt_coords_1.sum(dim=1) != 0
+            valid_coords_2 = gt_coords_2.sum(dim=1) != 0
+
+            distance_1 = torch.norm(gt_coords_1[valid_coords_1] - pred_coords_1[valid_coords_1], p=2, dim=1)
+            distance_2 = torch.norm(gt_coords_2[valid_coords_2] - pred_coords_2[valid_coords_2], p=2, dim=1)
+
+            coords_loss = 0.5 * (distance_1.mean() + distance_2.mean())
+
+            print(f'Coords loss: {coords_loss.item()}')
+
+            # NEXT: backpropagate coords_loss to update the encoder (fixed head)
+
 
             # MASKING
             mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
@@ -658,7 +736,7 @@ class TrainerEncoder:
 
             return loss, loss_dict
     
-    def _compute_combined_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, mode):
+    def _compute_combined_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode):
         """
         Loss for training a combined encoder:
         A) make fake_features similar to real_features (real_vs_fake),
@@ -765,6 +843,12 @@ if __name__ == "__main__":
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
             self.dataset_names = ['notre dame', 'brandenburg gate', 'pantheon']
+
+            self.head_paths = {
+                'notre dame': 'output/notre_dame.pt',
+                'brandenburg gate': 'output/brandenburg_gate.pt',
+                'pantheon': 'output/pantheon.pt',
+            }
 
             self.iter_val_limit = 20 # number of samples for each validation
             self.epoch_val_limit = 80 # for epoch validation
