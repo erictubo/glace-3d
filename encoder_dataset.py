@@ -433,6 +433,15 @@ def custom_collate(batch):
     fake_coords_1_padded = torch.stack(fake_coords_1_padded)
     fake_coords_2_padded = torch.stack(fake_coords_2_padded)
 
+    fake_glob_1 = torch.stack(fake_glob_1)
+    fake_glob_2 = torch.stack(fake_glob_2)
+
+
+    for i in range(1, len(names)):
+        assert names[i] == names[0]
+
+    name = names[0]
+
     assert real_images_1_padded.shape == real_images_2_padded.shape == fake_images_1_padded.shape == fake_images_2_padded.shape == masks_1_padded.shape == masks_2_padded.shape, \
         f"Shape mismatch: real 1 {real_images_1_padded.shape}, real 2 {real_images_2_padded.shape}," \
             f"fake 1 {fake_images_1_padded.shape}, fake 2 {fake_images_2_padded.shape}," \
@@ -440,7 +449,7 @@ def custom_collate(batch):
     
     assert fake_coords_1_padded.shape[2:] == fake_images_1_padded.shape[2:], f"Shape mismatch: fake coords 1 {fake_coords_1_padded.shape}, fake image 1 {fake_images_1_padded.shape}"
 
-    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, idx_1, idx_2, names
+    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, idx_1, idx_2, name
 
 
 def coords_to_colors(coords):
@@ -502,9 +511,11 @@ if __name__ == '__main__':
 
         batch = custom_collate(batch)
 
-        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, names = batch
+        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, name = batch
 
         combined_masks = torch.logical_and(masks_1, masks_2)
+
+        print(fake_glob_1.shape)
 
         fig, ax = plt.subplots(4, 8)
 
