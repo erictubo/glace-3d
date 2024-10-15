@@ -504,62 +504,60 @@ class TrainerEncoder:
 
     #     return losses.mean()
 
-    @staticmethod
-    def _resize_coords_to_features(coords, features_shape, visualize=False):
-        """
-        Resize coordinates to the same size as features, subsampling to each patch.
-        Input: coords (shape Bx3xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
-        Output: feature_coords (shape Bx3xHxW)
-        """
+    # @staticmethod
+    # def _resize_coords_to_features(coords, features_shape, visualize=False):
+    #     """
+    #     Resize coordinates to the same size as features, subsampling to each patch.
+    #     Input: coords (shape Bx3xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
+    #     Output: feature_coords (shape Bx3xHxW)
+    #     """
             
-        B, C, H, W = features_shape
+    #     B, C, H, W = features_shape
 
-        feature_coords = F.interpolate(coords, size=[H, W], mode='nearest')
+    #     feature_coords = F.interpolate(coords, size=[H, W], mode='nearest')
 
-        assert feature_coords.shape == (B, 3, H, W), feature_coords.shape
+    #     assert feature_coords.shape == (B, 3, H, W), feature_coords.shape
 
-        if visualize:
-            import matplotlib.pyplot as plt
-            from encoder_dataset import coords_to_colors
-            fig, ax = plt.subplots(2, 4)
-            for i in range(B):
-                ax[0, i].imshow(coords_to_colors(coords[i].cpu()))
-                ax[1, i].imshow(coords_to_colors(feature_coords[i].cpu()))
-                print('...')
-            plt.show()
+    #     if visualize:
+    #         import matplotlib.pyplot as plt
+    #         from encoder_dataset import coords_to_colors
+    #         fig, ax = plt.subplots(2, 4)
+    #         for i in range(B):
+    #             ax[0, i].imshow(coords_to_colors(coords[i].cpu()))
+    #             ax[1, i].imshow(coords_to_colors(feature_coords[i].cpu()))
+    #             print('...')
+    #         plt.show()
 
-        return feature_coords
+    #     return feature_coords
     
-    @staticmethod
-    def _resize_mask_to_features(image_mask, features_shape, threshold=0.25, visualize=False):
-        """
-        Resize mask to the same size as features, subsampling to each patch.
-        Input: image_mask (shape Bx1xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
-        Output: feature_mask (shape Bx1xHxW)
-        """
+    # @staticmethod
+    # def _resize_mask_to_features(image_mask, features_shape, threshold=0.25, visualize=False):
+    #     """
+    #     Resize mask to the same size as features, subsampling to each patch.
+    #     Input: image_mask (shape Bx1xIHxIW where IWxIH is the image size), features_shape (BxCxHxW)\\
+    #     Output: feature_mask (shape Bx1xHxW)
+    #     """
 
-        B, C, H, W = features_shape
+    #     B, C, H, W = features_shape
 
-        feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
-        feature_mask = (feature_mask >= threshold).bool()
+    #     feature_mask = F.interpolate(image_mask.float(), size=[H, W], mode='area')
+    #     feature_mask = (feature_mask >= threshold).bool()
 
-        assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
+    #     assert feature_mask.shape == (B, 1, H, W), feature_mask.shape
 
-        if visualize:
-            import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(2, 4)
-            for i in range(B):
-                ax[0, i].imshow(image_mask[i][0].cpu(), cmap='gray')
-                ax[1, i].imshow(feature_mask[i][0].cpu(), cmap='gray')
-                print('...')
-            plt.show()
+    #     if visualize:
+    #         import matplotlib.pyplot as plt
+    #         fig, ax = plt.subplots(2, 4)
+    #         for i in range(B):
+    #             ax[0, i].imshow(image_mask[i][0].cpu(), cmap='gray')
+    #             ax[1, i].imshow(feature_mask[i][0].cpu(), cmap='gray')
+    #             print('...')
+    #         plt.show()
 
-        assert feature_mask.sum() != 0, "mask_1 is invalid everywhere!"
+    #     assert feature_mask.sum() != 0, "mask_1 is invalid everywhere!"
 
-        return feature_mask
-    
-    # TODO: separate functions for visualization of coordinates & masks
-    
+    #     return feature_mask
+        
     @staticmethod
     def _mask_features(features_list, feature_mask):
         """
@@ -612,6 +610,44 @@ class TrainerEncoder:
 
         return valid_features_list, M
 
+    def _coords_loss(self, gt_coords, pred_coords, visualize=False):
+        """
+        Compute the loss between predicted and ground truth coordinates.
+        """
+        distance = torch.norm(gt_coords - pred_coords, p=2, dim=1)
+        valid_coords = (gt_coords.sum(dim=1) != 0)
+        distance_valid = distance[valid_coords]
+
+        if visualize:
+            import matplotlib.pyplot as plt
+            from encoder_dataset import coords_to_colors
+
+            difference = distance.cpu().numpy()
+            valid = valid_coords.cpu().numpy()
+            masked_difference = np.ma.masked_array(difference, mask=~valid)
+
+            cmap = plt.get_cmap('Spectral').reversed()
+            cmap.set_bad(color='white')
+            fig, ax = plt.subplots(self.options.batch_size, 3)
+            for i in range(self.options.batch_size):
+                ax[i, 0].imshow(coords_to_colors(gt_coords[i].cpu()))
+                ax[i, 1].imshow(coords_to_colors(pred_coords[i].cpu()))
+                ax[i, 2].imshow(masked_difference[i], cmap=cmap)
+            plt.show()
+
+        V = distance_valid.size(0)
+
+        return distance_valid.mean(), V
+
+    def _predict_coords(self, local_features, global_features, dataset_name):
+        """
+        Predict scene coordinates from local and global features by passing through the corresponding prediction head.
+        """
+        glob_features = global_features[..., None, None].expand(-1, -1, local_features.shape[2], local_features.shape[3])
+        glob_local_features = torch.cat((glob_features, local_features), dim=1)
+
+        return self.heads[dataset_name](glob_local_features)
+
     def _compute_separate_loss(self, batch, mode):
         """
         Loss for training a separate encoder:
@@ -620,90 +656,44 @@ class TrainerEncoder:
         + Maintain magntiude of features close to 1.0.
         """
 
-        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name = batch
+        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, gt_coords_1, gt_coords_2, global_features_1, global_features_2, idx_1, idx_2, dataset_name = batch
+
+        # mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
+        # mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
+        mask_combined = torch.logical_and(mask_1, mask_2)
+
+        # gt_coords_1 = self._resize_coords_to_features(gt_coords_1, fake_features_1.shape)
+        # gt_coords_2 = self._resize_coords_to_features(gt_coords_2, fake_features_2.shape)
 
         assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
         assert mode in ['training', 'validation']
 
         with torch.no_grad():
-
             real_init_features_1 = self.initial_encoder(real_image_1)
             real_init_features_2 = self.initial_encoder(real_image_2)
 
         with torch.no_grad() if mode=='validation' else torch.enable_grad():
-
             fake_features_1 = self.encoder(fake_image_1)
             fake_features_2 = self.encoder(fake_image_2)
 
+            # assert that mask shape and coords shape match features shape
+            assert mask_1.shape[2:] == gt_coords_1.shape[2:] == fake_features_1.shape[2:], f"{mask_1.shape} != {gt_coords_1.shape} != {fake_features_1.shape}"
+            assert mask_2.shape[2:] == gt_coords_2.shape[2:] == fake_features_2.shape[2:], f"{mask_2.shape} != {gt_coords_2.shape} != {fake_features_2.shape}"
+            
 
-        # SCENE COORDINATES
-        gt_coords_1 = self._resize_coords_to_features(coords_1, fake_features_1.shape)
-        gt_coords_2 = self._resize_coords_to_features(coords_2, fake_features_2.shape)
-
-        glob_features_1 = glob_1[..., None, None].expand(-1, -1, fake_features_1.shape[2], fake_features_1.shape[3])
-        glob_features_2 = glob_2[..., None, None].expand(-1, -1, fake_features_2.shape[2], fake_features_2.shape[3])
-
-        glob_local_features_1 = torch.cat((glob_features_1, fake_features_1), dim=1)
-        glob_local_features_2 = torch.cat((glob_features_2, fake_features_2), dim=1)
-
-        with torch.no_grad() if mode=='validation' else torch.enable_grad():
-
-            pred_coords_1 = self.heads[dataset_name](glob_local_features_1)
-            pred_coords_2 = self.heads[dataset_name](glob_local_features_2)
-
+            pred_coords_1 = self._predict_coords(fake_features_1, global_features_1, dataset_name)
+            pred_coords_2 = self._predict_coords(fake_features_2, global_features_2, dataset_name)
 
         assert pred_coords_1.shape == gt_coords_1.shape, f"{pred_coords_1.shape} != {gt_coords_1.shape}"
         assert pred_coords_2.shape == gt_coords_2.shape, f"{pred_coords_2.shape} != {gt_coords_2.shape}"
 
-        valid_coords_1 = (gt_coords_1.sum(dim=1) != 0)
-        valid_coords_2 = (gt_coords_2.sum(dim=1) != 0)
-
-        distance_1 = torch.norm(gt_coords_1 - pred_coords_1, p=2, dim=1)
-        distance_2 = torch.norm(gt_coords_2 - pred_coords_2, p=2, dim=1)
-
-        distance_1_valid = distance_1[valid_coords_1]
-        distance_2_valid = distance_2[valid_coords_2]
-
-        V1 = distance_1_valid.size(0)
-        V2 = distance_2_valid.size(0)
-
-        coords_loss = (V1 * distance_1_valid.median() + V2 * distance_2_valid.median()) / (V1 + V2)
-
-        print(f'Coords loss: {round(coords_loss.item(), 2)}')
-
-
-        def visualize_coords():
-
-            difference_1 = distance_1.cpu().numpy()
-            difference_2 = distance_2.cpu().numpy()
-            valid_1 = valid_coords_1.cpu().numpy()
-            valid_2 = valid_coords_2.cpu().numpy()
-            masked_difference_1 = np.ma.masked_array(difference_1, mask=~valid_1)
-            masked_difference_2 = np.ma.masked_array(difference_2, mask=~valid_2)
-
-            import matplotlib.pyplot as plt
-            from encoder_dataset import coords_to_colors
-
-            cmap = plt.get_cmap('Spectral').reversed()
-            cmap.set_bad(color='white')
-            fig, ax = plt.subplots(self.options.batch_size, 6)
-            for i in range(self.options.batch_size):
-                ax[i, 0].imshow(coords_to_colors(gt_coords_1[i].cpu()))
-                ax[i, 1].imshow(coords_to_colors(pred_coords_1[i].cpu()))
-                ax[i, 2].imshow(masked_difference_1[i], cmap=cmap)
-                ax[i, 3].imshow(coords_to_colors(gt_coords_2[i].cpu()))
-                ax[i, 4].imshow(coords_to_colors(pred_coords_2[i].cpu()))
-                ax[i, 5].imshow(masked_difference_2[i], cmap=cmap)
-                print('...')
-            plt.show()
-
+        # 3D LOSS
+        coords_1_loss, V1 = self._coords_loss(gt_coords_1, pred_coords_1)
+        coords_2_loss, V2 = self._coords_loss(gt_coords_2, pred_coords_2)
+        coords_loss = (V1 * coords_1_loss + V2 * coords_2_loss) / (V1 + V2)
 
         # MASKING
-        mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
-        mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
-        mask_combined = torch.logical_and(mask_1, mask_2)
-
         (real_init_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, fake_features_1], mask_1)
         (real_init_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, fake_features_2], mask_2)
 
@@ -765,8 +755,12 @@ class TrainerEncoder:
         + Maintain magntiude of features close to 1.0.
         """
 
-        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name = batch
+        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, gt_coords_1, gt_coords_2, global_features_1, global_features_2, idx_1, idx_2, dataset_name = batch
 
+        # mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
+        # mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
+        mask_combined = torch.logical_and(mask_1, mask_2)
+        
         assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
         assert mode in ['training', 'validation']
@@ -785,10 +779,6 @@ class TrainerEncoder:
                 fake_features_2 = self.encoder(fake_image_2)
 
             # MASKING
-            mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
-            mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
-            mask_combined = torch.logical_and(mask_1, mask_2)
-
             (real_init_features_1_MC, real_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, real_features_1, fake_features_1], mask_1)
             (real_init_features_2_NC, real_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, real_features_2, fake_features_2], mask_2)
             (fake_features_1_OC, fake_features_2_OC), O = self._mask_features([fake_features_1, fake_features_2], mask_combined)
@@ -864,24 +854,24 @@ if __name__ == "__main__":
             self.encoder_path = "ace_encoder_pretrained.pt"
             self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
 
-            self.dataset_names = ['notre dame', 'pantheon'] #, 'brandenburg gate']
+            self.dataset_names = ['notre dame', 'pantheon', 'brandenburg gate']
 
             self.head_paths = {
                 'notre dame': 'output/notre_dame.pt',
                 'pantheon': 'output/pantheon.pt',
-                #'brandenburg gate': 'output/brandenburg_gate.pt',
+                'brandenburg gate': 'output/brandenburg_gate.pt',
             }
 
-            self.iter_val_limit = 20 # number of samples for each validation
-            self.epoch_val_limit = 80 # for epoch validation
+            self.iter_val_limit = 15 # number of samples for each validation
+            self.epoch_val_limit = 60 # for epoch validation
 
             self.learning_rate = 0.0005
             self.weight_decay = 0.01
 
-            self.max_iterations = 1250
+            self.batch_size = 3
             self.num_epochs = 2
-            self.batch_size = 4
-            self.gradient_accumulation_samples = 20
+            self.max_iterations = 5000 / self.batch_size
+            self.gradient_accumulation_samples = 15
             self.validation_frequency = 5
 
             self.use_half = True
@@ -940,7 +930,3 @@ if __name__ == "__main__":
 
     # print('Finished')
 
-
-    # TODO: make sure CUDA doesn't run out of memory
-
-    # TODO: check that the prediction head is not updated
