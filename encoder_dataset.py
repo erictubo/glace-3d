@@ -413,10 +413,61 @@ def custom_collate(batch):
         fake_image_2_padded = pad_tensor(fake_images_2[i], l_pad, r_pad, t_pad, b_pad)
         mask_1_padded = pad_tensor(masks_1[i].float(), l_pad, r_pad, t_pad, b_pad).bool()
         mask_2_padded = pad_tensor(masks_2[i].float(), l_pad, r_pad, t_pad, b_pad).bool()
-
-        # NEW: pad coordinates
         fake_coords_1_padded = pad_tensor(fake_coords_1[i], l_pad, r_pad, t_pad, b_pad)
         fake_coords_2_padded = pad_tensor(fake_coords_2[i], l_pad, r_pad, t_pad, b_pad)
+
+
+        # TODO: subsample masks and coords to feature size
+        # masks: interpolate area with threshold - shape: 1xHxW
+        # coords: interpolate nearest - shape: 3xHxW
+        
+        OUTPUT_SUBSAMPLE = 8
+        import math
+
+        H = math.ceil(max_height / OUTPUT_SUBSAMPLE)
+        W = math.ceil(max_width / OUTPUT_SUBSAMPLE)
+
+        def _subsample_mask(mask, threshold=0.25, visualize=False):
+
+            mask_sub = F.interpolate(mask.float(), size=[H, W], mode='area') >= threshold
+
+            if visualize:
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots(1, 2)
+                ax[0].imshow(mask[0].cpu(), cmap='gray')
+                ax[1].imshow(mask_sub[0].cpu(), cmap='gray')
+                plt.show()
+            
+            return mask_sub
+
+        def _subsample_coords(coords, visualize=False):
+
+            coords_sub = F.interpolate(coords, size=[H, W], mode='nearest')
+
+            if visualize:
+                import matplotlib.pyplot as plt
+                from encoder_dataset import coords_to_colors
+                fig, ax = plt.subplots(1, 2)
+                ax[0].imshow(coords_to_colors(coords.cpu()))
+                ax[1].imshow(coords_to_colors(coords_sub.cpu()))
+                plt.show()
+            
+            return coords_sub
+        
+
+        print(f'Masks shape before: {mask_1_padded.shape}, {mask_2_padded.shape}')
+        mask_1_padded = _subsample_mask(mask_1_padded)
+        mask_2_padded = _subsample_mask(mask_2_padded)
+        print(f'Masks shape after: {mask_1_padded.shape}, {mask_2_padded.shape}')
+
+        print(f'Coords shape before: {fake_coords_1_padded.shape}, {fake_coords_2_padded.shape}')
+        fake_coords_1_padded = _subsample_coords(fake_coords_1_padded)
+        fake_coords_2_padded = _subsample_coords(fake_coords_2_padded)
+        print(f'Coords shape after: {fake_coords_1_padded.shape}, {fake_coords_2_padded.shape}')
+
+        # TODO: add batch visualization for subsampling: before vs after
+
+        # TODO: add visualization of all batch data (see in __main__ below)
 
         padded_images.append((real_image_1_padded, real_image_2_padded, fake_image_1_padded, fake_image_2_padded, mask_1_padded, mask_2_padded, fake_coords_1_padded, fake_coords_2_padded))
 
