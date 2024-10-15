@@ -167,21 +167,21 @@ class Head(nn.Module):
         state_dict: pretrained state dictionary.
         """
         # Mean is zero (will be loaded from the state dict).
-        if "heads.centers" in state_dict:
-            mean = torch.zeros((state_dict["heads.centers"].shape[1],3))
+        if "centers" in state_dict:
+            mean = torch.zeros((state_dict["centers"].shape[1],3))
         else:
             mean = torch.zeros((3,))
 
         # Count how many head blocks are in the dictionary.
-        pattern = re.compile(r"^heads\.\d+c0\.weight$")
+        pattern = re.compile(r"^\d+c0\.weight$")
         num_head_blocks = sum(1 for k in state_dict.keys() if pattern.match(k))
 
         # Whether the network uses homogeneous coordinates.
-        use_homogeneous = state_dict["heads.fc3.weight"].shape[0] == 4
+        use_homogeneous = state_dict["fc3.weight"].shape[0] == 4
 
-        num_decoder_features = state_dict['heads.res3_conv1.weight'].shape[1]
-        head_channels =  state_dict['heads.res3_conv1.weight'].shape[0]
-        mlp_ratio = state_dict['heads.res3_conv2.weight'].shape[0]/state_dict['heads.res3_conv2.weight'].shape[1]
+        num_decoder_features = state_dict['res3_conv1.weight'].shape[1]
+        head_channels =  state_dict['res3_conv1.weight'].shape[0]
+        mlp_ratio = state_dict['res3_conv2.weight'].shape[0]/state_dict['res3_conv2.weight'].shape[1]
 
         # Create a prediction head.
         _logger.info(f"Creating head from pretrained state_dict:"
@@ -190,8 +190,8 @@ class Head(nn.Module):
                      f"\n\tDecoder feature size: {num_decoder_features}"
                      f"\n\tHead channels: {head_channels}"
                      f"\n\tMLP ratio: {mlp_ratio}")
-        head = cls(mean, num_head_blocks, use_homogeneous, num_decoder_features,
-                   head_channels=head_channels, mlp_ratio=mlp_ratio)
+        head = cls(mean, num_head_blocks, use_homogeneous,
+                   in_channels=num_decoder_features, head_channels=head_channels, mlp_ratio=mlp_ratio)
 
         # Load all weights.
         head.load_state_dict(state_dict)
@@ -225,7 +225,7 @@ class Regressor(nn.Module):
         self.decoder_dim = num_decoder_features
 
         self.encoder = Encoder(out_channels=self.feature_dim)
-        self.heads = Head(mean, num_head_blocks, use_homogeneous, in_channels=num_decoder_features,head_channels=head_channels,mlp_ratio=mlp_ratio)
+        self.heads = Head(mean, num_head_blocks, use_homogeneous, in_channels=num_decoder_features, head_channels=head_channels, mlp_ratio=mlp_ratio)
 
     @classmethod
     def create_from_encoder(cls, encoder_state_dict, mean, num_head_blocks, use_homogeneous, global_feat_dim=0, head_channels=512, mlp_ratio=1.0):
