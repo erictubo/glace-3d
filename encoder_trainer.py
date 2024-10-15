@@ -295,71 +295,62 @@ class TrainerEncoder:
         accumulated_loss = 0.0
         accumulated_loss_dict = {}
 
-        for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name in self.train_loader:
+        with autocast(enabled=self.options.use_half):
+            for batch in self.train_loader:
 
-            self.iteration += 1
+                self.iteration += 1
 
-            real_image_1 = real_image_1.to(self.device)
-            real_image_2 = real_image_2.to(self.device)
-            fake_image_1 = fake_image_1.to(self.device)
-            fake_image_2 = fake_image_2.to(self.device)
-            mask_1 = mask_1.to(self.device)
-            mask_2 = mask_2.to(self.device)
-            coords_1 = coords_1.to(self.device)
-            coords_2 = coords_2.to(self.device)
-            glob_1 = glob_1.to(self.device)
-            glob_2 = glob_2.to(self.device)
+                batch = (item.to(self.device, non_blocking=True) if isinstance(item, torch.Tensor) else item for item in batch)
 
-            loss, loss_dict = self._compute_loss(
-                real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode='training')
-            accumulated_loss += loss
-            total_loss += loss.item()
+                loss, loss_dict = self._compute_loss(batch, mode='training')
+                accumulated_loss += loss
+                total_loss += loss.item()
 
-            for key, value in loss_dict.items():
-                accumulated_loss_dict[key] = accumulated_loss_dict.get(key, 0) + value
+                for key, value in loss_dict.items():
+                    accumulated_loss_dict[key] = accumulated_loss_dict.get(key, 0) + value
 
-            loss /= self.options.gradient_accumulation_steps
-            self.scaler.scale(loss).backward()
+                loss /= self.options.gradient_accumulation_steps
+                self.scaler.scale(loss).backward()
 
-            # Gradient accumulation
-            if self.iteration % self.options.gradient_accumulation_steps == 0:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
+                # Gradient accumulation
+                if self.iteration % self.options.gradient_accumulation_steps == 0:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
 
-                total_norm = self._compute_gradient_norm()
-                self.logger.writer.add_scalar('gradient_norm', total_norm, self.iteration)
+                    total_norm = self._compute_gradient_norm()
+                    self.logger.writer.add_scalar('gradient_norm', total_norm, self.iteration)
 
-                # Log average losses
-                avg_loss_dict = {k: v / self.options.gradient_accumulation_steps for k, v in accumulated_loss_dict.items()}
-                self.logger.log_train(avg_loss_dict, self.iteration, self.epoch)
-                accumulated_loss_dict = {}
+                    # Log average losses
+                    avg_loss_dict = {k: v / self.options.gradient_accumulation_steps for k, v in accumulated_loss_dict.items()}
+                    self.logger.log_train(avg_loss_dict, self.iteration, self.epoch)
+                    accumulated_loss_dict = {}
 
-                accumulated_loss /= self.options.gradient_accumulation_steps
-                _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} Loss: {accumulated_loss:.6f}')
-                accumulated_loss = 0.0
+                    accumulated_loss /= self.options.gradient_accumulation_steps
+                    _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} Loss: {accumulated_loss:.6f}')
+                    accumulated_loss = 0.0
 
-                if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
-                    val_loss, val_loss_dict = self._validate(self.options.iter_val_limit)
-                    self.logger.log_validation_iteration(val_loss_dict, self.iteration)
-                    _logger.info(f'Validation Loss: {val_loss:.6f}')
+                    if self.iteration % (self.options.gradient_accumulation_steps * self.options.validation_frequency) == 0:
+                        val_loss, val_loss_dict = self._validate(self.options.iter_val_limit)
+                        self.logger.log_validation_iteration(val_loss_dict, self.iteration)
+                        _logger.info(f'Validation Loss: {val_loss:.6f}')
 
-                    # Save model
-                    _logger.info(f"Saving model at iteration {self.iteration}")
-                    self.save_model(f"{self.options.output_path}_i{self.iteration}.pt")
+                        # Save model
+                        _logger.info(f"Saving model at iteration {self.iteration}")
+                        self.save_model(f"{self.options.output_path}_i{self.iteration}.pt")
+                    
+                    # Adjust learning rate
+                    self.scheduler.step()
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    self.logger.writer.add_scalar('learning_rate', current_lr, self.iteration)
                 
-                # Adjust learning rate
-                self.scheduler.step()
-                current_lr = self.optimizer.param_groups[0]['lr']
-                self.logger.writer.add_scalar('learning_rate', current_lr, self.iteration)
-            
-            else:
-                _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
+                else:
+                    _logger.info(f'Iteration {self.iteration}/{len(self.train_loader)} ...')
 
-            # Stop training if maximum number of iterations reached
-            if self.iteration >= self.options.max_iterations:
-                _logger.info(f"Stopping training because maximum number of iterations reached")
-                break
+                # Stop training if maximum number of iterations reached
+                if self.iteration >= self.options.max_iterations:
+                    _logger.info(f"Stopping training because maximum number of iterations reached")
+                    break
                         
         return total_loss / len(self.train_loader)
 
@@ -388,24 +379,14 @@ class TrainerEncoder:
         val_loader = self.get_random_validation_subset(n_samples)
 
         with torch.no_grad(), autocast(enabled=self.options.use_half):
-            for real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name in val_loader:
+            for batch in val_loader:
                 
                 val_iteration += 1
                 _logger.info(f'{val_iteration} / {len(val_loader)} ...')
 
-                real_image_1 = real_image_1.to(self.device)
-                real_image_2 = real_image_2.to(self.device)
-                fake_image_1 = fake_image_1.to(self.device)
-                fake_image_2 = fake_image_2.to(self.device)
-                mask_1 = mask_1.to(self.device)
-                mask_2 = mask_2.to(self.device)
-                coords_1 = coords_1.to(self.device)
-                coords_2 = coords_2.to(self.device)
-                glob_1 = glob_1.to(self.device)
-                glob_2 = glob_2.to(self.device)
+                batch = (item.to(self.device, non_blocking=True) if isinstance(item, torch.Tensor) else item for item in batch)
 
-                loss, loss_dict = self._compute_loss(
-                    real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name,  mode='validation')
+                loss, loss_dict = self._compute_loss(batch,  mode='validation')
                 total_loss += loss.item()
 
                 # Accumulate losses
@@ -630,24 +611,8 @@ class TrainerEncoder:
         assert(len(valid_features_list) == len(features_list))
 
         return valid_features_list, M
-    
-    # def compute_3d_norm(tensor1, tensor2):
-    #     # Ensure the tensors have the same shape
-    #     assert tensor1.shape == tensor2.shape, "Tensors must have the same shape"
-        
-    #     # Compute the difference
-    #     diff = tensor1 - tensor2
-        
-    #     # Compute the squared norm along the coordinate dimension (dim=1)
-    #     squared_norm = torch.sum(diff**2, dim=1)
-        
-    #     # Take the square root to get the Euclidean norm
-    #     norm = torch.sqrt(squared_norm)
-        
-    #     return norm
 
-
-    def _compute_separate_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode):
+    def _compute_separate_loss(self, batch, mode):
         """
         Loss for training a separate encoder:
         A) make fake_features similar to real_init_features (real_vs_fake),
@@ -655,145 +620,143 @@ class TrainerEncoder:
         + Maintain magntiude of features close to 1.0.
         """
 
+        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name = batch
+
         assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
         assert mode in ['training', 'validation']
 
-        with autocast(enabled=self.options.use_half):
+        with torch.no_grad():
 
-            with torch.no_grad():
-                real_init_features_1 = self.initial_encoder(real_image_1)
-                real_init_features_2 = self.initial_encoder(real_image_2)
+            real_init_features_1 = self.initial_encoder(real_image_1)
+            real_init_features_2 = self.initial_encoder(real_image_2)
 
-            with torch.no_grad() if mode=='validation' else torch.enable_grad():
+        with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-                fake_features_1 = self.encoder(fake_image_1)
-                fake_features_2 = self.encoder(fake_image_2)
-
-
-            # SCENE COORDINATES
-            gt_coords_1 = self._resize_coords_to_features(coords_1, fake_features_1.shape)
-            gt_coords_2 = self._resize_coords_to_features(coords_2, fake_features_2.shape)
-
-            glob_features_1 = glob_1[..., None, None].expand(-1, -1, fake_features_1.shape[2], fake_features_1.shape[3])
-            glob_features_2 = glob_2[..., None, None].expand(-1, -1, fake_features_2.shape[2], fake_features_2.shape[3])
-
-            glob_local_features_1 = torch.cat((glob_features_1, fake_features_1), dim=1)
-            glob_local_features_2 = torch.cat((glob_features_2, fake_features_2), dim=1)
-            
-            with autocast(enabled=self.options.use_half):
-
-                pred_coords_1 = self.heads[dataset_name](glob_local_features_1)
-                pred_coords_2 = self.heads[dataset_name](glob_local_features_2)
-
-            assert pred_coords_1.shape == gt_coords_1.shape, f"{pred_coords_1.shape} != {gt_coords_1.shape}"
-            assert pred_coords_2.shape == gt_coords_2.shape, f"{pred_coords_2.shape} != {gt_coords_2.shape}"
+            fake_features_1 = self.encoder(fake_image_1)
+            fake_features_2 = self.encoder(fake_image_2)
 
 
-            valid_coords_1 = (gt_coords_1.sum(dim=1) != 0)
-            valid_coords_2 = (gt_coords_2.sum(dim=1) != 0)
+        # SCENE COORDINATES
+        gt_coords_1 = self._resize_coords_to_features(coords_1, fake_features_1.shape)
+        gt_coords_2 = self._resize_coords_to_features(coords_2, fake_features_2.shape)
 
-            distance_1 = torch.norm(gt_coords_1 - pred_coords_1, p=2, dim=1)
-            distance_2 = torch.norm(gt_coords_2 - pred_coords_2, p=2, dim=1)
+        glob_features_1 = glob_1[..., None, None].expand(-1, -1, fake_features_1.shape[2], fake_features_1.shape[3])
+        glob_features_2 = glob_2[..., None, None].expand(-1, -1, fake_features_2.shape[2], fake_features_2.shape[3])
 
-            distance_1_valid = distance_1[valid_coords_1]
-            distance_2_valid = distance_2[valid_coords_2]
+        glob_local_features_1 = torch.cat((glob_features_1, fake_features_1), dim=1)
+        glob_local_features_2 = torch.cat((glob_features_2, fake_features_2), dim=1)
 
-            V1 = distance_1_valid.size(0)
-            V2 = distance_2_valid.size(0)
+        with torch.no_grad() if mode=='validation' else torch.enable_grad():
 
-            # IDEA: Median instead of mean to ignore outliers
-
-            coords_loss = (V1 * distance_1_valid.median() + V2 * distance_2_valid.median()) / (V1 + V2)
-
-            # coords_loss = (V1 * distance_1_valid.mean() + V2 * distance_2_valid.mean()) / (V1 + V2)
-
-            print(f'Coords loss: {round(coords_loss.item(), 2)}')
-
-            def visualize_coords():
-
-                difference_1 = distance_1.cpu().numpy()
-                difference_2 = distance_2.cpu().numpy()
-                valid_1 = valid_coords_1.cpu().numpy()
-                valid_2 = valid_coords_2.cpu().numpy()
-                masked_difference_1 = np.ma.masked_array(difference_1, mask=~valid_1)
-                masked_difference_2 = np.ma.masked_array(difference_2, mask=~valid_2)
-
-                import matplotlib.pyplot as plt
-                from encoder_dataset import coords_to_colors
-
-                cmap = plt.get_cmap('Spectral').reversed()
-                cmap.set_bad(color='white')
-                fig, ax = plt.subplots(self.options.batch_size, 6)
-                for i in range(self.options.batch_size):
-                    ax[i, 0].imshow(coords_to_colors(gt_coords_1[i].cpu()))
-                    ax[i, 1].imshow(coords_to_colors(pred_coords_1[i].cpu()))
-                    ax[i, 2].imshow(masked_difference_1[i], cmap=cmap)
-                    ax[i, 3].imshow(coords_to_colors(gt_coords_2[i].cpu()))
-                    ax[i, 4].imshow(coords_to_colors(pred_coords_2[i].cpu()))
-                    ax[i, 5].imshow(masked_difference_2[i], cmap=cmap)
-                    print('...')
-                plt.show()
+            pred_coords_1 = self.heads[dataset_name](glob_local_features_1)
+            pred_coords_2 = self.heads[dataset_name](glob_local_features_2)
 
 
-            # MASKING
-            mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
-            mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
-            mask_combined = torch.logical_and(mask_1, mask_2)
+        assert pred_coords_1.shape == gt_coords_1.shape, f"{pred_coords_1.shape} != {gt_coords_1.shape}"
+        assert pred_coords_2.shape == gt_coords_2.shape, f"{pred_coords_2.shape} != {gt_coords_2.shape}"
 
-            (real_init_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, fake_features_1], mask_1)
-            (real_init_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, fake_features_2], mask_2)
+        valid_coords_1 = (gt_coords_1.sum(dim=1) != 0)
+        valid_coords_2 = (gt_coords_2.sum(dim=1) != 0)
 
-            (real_init_features_1_OC, fake_features_1_OC, real_init_features_2_OC, fake_features_2_OC), O = \
-                self._mask_features([real_init_features_1, fake_features_1, real_init_features_2, fake_features_2], mask_combined)
+        distance_1 = torch.norm(gt_coords_1 - pred_coords_1, p=2, dim=1)
+        distance_2 = torch.norm(gt_coords_2 - pred_coords_2, p=2, dim=1)
 
-            # MAGNITUDE LOSS
-            magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
-            magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
-            magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
+        distance_1_valid = distance_1[valid_coords_1]
+        distance_2_valid = distance_2[valid_coords_2]
 
-            magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
-            magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
-            magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
+        V1 = distance_1_valid.size(0)
+        V2 = distance_2_valid.size(0)
 
-            magnitude = magnitude_fake
+        coords_loss = (V1 * distance_1_valid.median() + V2 * distance_2_valid.median()) / (V1 + V2)
 
-            # COSINE LOSS
-            # Minimize
-            cosine_fake_1_vs_real_1_init = self._cosine_loss(fake_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.1)
-            cosine_fake_2_vs_real_2_init = self._cosine_loss(fake_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.1)
-            cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N) # Equal weighting of each valid patch
+        print(f'Coords loss: {round(coords_loss.item(), 2)}')
 
-            # Maximize
-            cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
 
-            # Track
-            cosine_real_1_init_vs_real_2_init = self._cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
+        def visualize_coords():
 
-            # a, b = self.options.contrastive_weights
+            difference_1 = distance_1.cpu().numpy()
+            difference_2 = distance_2.cpu().numpy()
+            valid_1 = valid_coords_1.cpu().numpy()
+            valid_2 = valid_coords_2.cpu().numpy()
+            masked_difference_1 = np.ma.masked_array(difference_1, mask=~valid_1)
+            masked_difference_2 = np.ma.masked_array(difference_2, mask=~valid_2)
 
-            # loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
+            import matplotlib.pyplot as plt
+            from encoder_dataset import coords_to_colors
 
-            loss = coords_loss / 50
+            cmap = plt.get_cmap('Spectral').reversed()
+            cmap.set_bad(color='white')
+            fig, ax = plt.subplots(self.options.batch_size, 6)
+            for i in range(self.options.batch_size):
+                ax[i, 0].imshow(coords_to_colors(gt_coords_1[i].cpu()))
+                ax[i, 1].imshow(coords_to_colors(pred_coords_1[i].cpu()))
+                ax[i, 2].imshow(masked_difference_1[i], cmap=cmap)
+                ax[i, 3].imshow(coords_to_colors(gt_coords_2[i].cpu()))
+                ax[i, 4].imshow(coords_to_colors(pred_coords_2[i].cpu()))
+                ax[i, 5].imshow(masked_difference_2[i], cmap=cmap)
+                print('...')
+            plt.show()
 
-            loss += magnitude
 
-            loss_dict = {
-                'F_3D' : coords_loss.item(),
+        # MASKING
+        mask_1 = self._resize_mask_to_features(mask_1, fake_features_1.shape)
+        mask_2 = self._resize_mask_to_features(mask_2, fake_features_2.shape)
+        mask_combined = torch.logical_and(mask_1, mask_2)
 
-                'F-Ri_cos': cosine_fake_vs_real_init.item(),
-                'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
-                'R1i-R2i_cos': cosine_real_1_init_vs_real_2_init.item(),
+        (real_init_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, fake_features_1], mask_1)
+        (real_init_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, fake_features_2], mask_2)
 
-                '|F|': magnitude_fake.item(),
-                '|Ri|': magnitude_real_init.item(),
+        (real_init_features_1_OC, fake_features_1_OC, real_init_features_2_OC, fake_features_2_OC), O = \
+            self._mask_features([real_init_features_1, fake_features_1, real_init_features_2, fake_features_2], mask_combined)
 
-                'Total': loss.item(),
-            }
+        # MAGNITUDE LOSS
+        magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
+        magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
+        magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
 
-            return loss, loss_dict
+        magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
+        magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
+        magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
+
+        magnitude = magnitude_fake
+
+        # COSINE LOSS
+        # Minimize
+        cosine_fake_1_vs_real_1_init = self._cosine_loss(fake_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.1)
+        cosine_fake_2_vs_real_2_init = self._cosine_loss(fake_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.1)
+        cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N) # Equal weighting of each valid patch
+
+        # Maximize
+        cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
+
+        # Track
+        cosine_real_1_init_vs_real_2_init = self._cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
+
+        # a, b = self.options.contrastive_weights
+
+        # loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
+
+        loss = coords_loss / 50
+
+        loss += magnitude
+
+        loss_dict = {
+            'F_3D' : coords_loss.item(),
+
+            'F-Ri_cos': cosine_fake_vs_real_init.item(),
+            'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
+            'R1i-R2i_cos': cosine_real_1_init_vs_real_2_init.item(),
+
+            '|F|': magnitude_fake.item(),
+            '|Ri|': magnitude_real_init.item(),
+
+            'Total': loss.item(),
+        }
+
+        return loss, loss_dict
     
-    def _compute_combined_loss(self, real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name, mode):
+    def _compute_combined_loss(self, batch, mode):
         """
         Loss for training a combined encoder:
         A) make fake_features similar to real_features (real_vs_fake),
@@ -801,6 +764,8 @@ class TrainerEncoder:
         C) anchor real_features to real_init_features (real_vs_real_init),
         + Maintain magntiude of features close to 1.0.
         """
+
+        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, coords_1, coords_2, glob_1, glob_2, idx_1, idx_2, dataset_name = batch
 
         assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
@@ -935,7 +900,7 @@ if __name__ == "__main__":
     options.loss_function = 'separate'
     options.val_dataset_name = 'pantheon' # 'brandenburg gate'
     options.contrastive_weights = (0.0, 0.0)
-    options.experiment_name = "3d-median"
+    options.experiment_name = "test-3d-median"
     options.output_path = f"output_encoder/{options.experiment_name}"
 
     print(f'Training {options.experiment_name}')
