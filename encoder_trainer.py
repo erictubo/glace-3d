@@ -312,6 +312,13 @@ class TrainerEncoder:
                 loss /= self.options.gradient_accumulation_steps
                 self.scaler.scale(loss).backward()
 
+                # Check gradients
+                for name, param in self.encoder.named_parameters():
+                    if param.grad is None:
+                        print(f"No gradient for {name}")
+                    elif torch.isnan(param.grad).any():
+                        print(f"NaN gradient for {name}")
+
                 # Gradient accumulation
                 if self.iteration % self.options.gradient_accumulation_steps == 0:
                     self.scaler.step(self.optimizer)
@@ -677,10 +684,10 @@ class TrainerEncoder:
 
         # loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
 
-        loss = coords_loss / 50
+        loss = coords_loss # / 50
 
-        if self.options.magnitude:
-            loss += magnitude
+        # if self.options.magnitude:
+        #     loss += magnitude
 
         loss_dict = {
             'F_3D' : coords_loss.item(),
@@ -714,75 +721,72 @@ class TrainerEncoder:
 
         assert mode in ['training', 'validation']
 
-        with autocast(enabled=self.options.use_half):
+        with torch.no_grad():
+            real_init_features_1 = self.initial_encoder(real_image_1)
+            real_init_features_2 = self.initial_encoder(real_image_2)
 
-            with torch.no_grad():
-                real_init_features_1 = self.initial_encoder(real_image_1)
-                real_init_features_2 = self.initial_encoder(real_image_2)
+        with torch.no_grad() if mode=='validation' else torch.enable_grad():
+            real_features_1 = self.encoder(real_image_1)
+            real_features_2 = self.encoder(real_image_2)
+            fake_features_1 = self.encoder(fake_image_1)
+            fake_features_2 = self.encoder(fake_image_2)
 
-            with torch.no_grad() if mode=='validation' else torch.enable_grad():
+        # MASKING
+        (real_init_features_1_MC, real_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, real_features_1, fake_features_1], mask_1)
+        (real_init_features_2_NC, real_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, real_features_2, fake_features_2], mask_2)
+        (fake_features_1_OC, fake_features_2_OC), O = self._mask_features([fake_features_1, fake_features_2], mask_combined)
 
-                real_features_1 = self.encoder(real_image_1)
-                real_features_2 = self.encoder(real_image_2)
-                fake_features_1 = self.encoder(fake_image_1)
-                fake_features_2 = self.encoder(fake_image_2)
+        # MAGNITUDE
+        # Optimize to 1.0
+        magnitude_real_1 = self._magnitude_loss(real_features_1_MC)
+        magnitude_real_2 = self._magnitude_loss(real_features_2_NC)
+        magnitude_real = 0.5 * (magnitude_real_1 + magnitude_real_2)
 
-            # MASKING
-            (real_init_features_1_MC, real_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, real_features_1, fake_features_1], mask_1)
-            (real_init_features_2_NC, real_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, real_features_2, fake_features_2], mask_2)
-            (fake_features_1_OC, fake_features_2_OC), O = self._mask_features([fake_features_1, fake_features_2], mask_combined)
-
-            # MAGNITUDE
-            # Optimize to 1.0
-            magnitude_real_1 = self._magnitude_loss(real_features_1_MC)
-            magnitude_real_2 = self._magnitude_loss(real_features_2_NC)
-            magnitude_real = 0.5 * (magnitude_real_1 + magnitude_real_2)
-
-            magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
-            magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
-            magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
-            
-            # Track
-            magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
-            magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
-            magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
-
-            magnitude = 0.5 * (magnitude_real + magnitude_fake)
-
-            # COSINE LOSS
-            # Minimize
-            cosine_real_1_vs_fake_1 = self._cosine_loss(real_features_1_MC, fake_features_1_MC, target_value=1, margin=0.1)
-            cosine_real_2_vs_fake_2 = self._cosine_loss(real_features_2_NC, fake_features_2_NC, target_value=1, margin=0.1)
-            cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N) # Equal weighting of each valid patch
-
-            # Maximize
-            cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
-            
-            # Anchor
-            cosine_real_1_vs_real_1_init = self._cosine_loss(real_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.2)
-            cosine_real_2_vs_real_2_init = self._cosine_loss(real_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.2)
-            cosine_real_vs_real_init = (M * cosine_real_1_vs_real_1_init + N * cosine_real_2_vs_real_2_init) / (M + N)
-            
-            a, b, c = self.options.contrastive_weights
-
-            loss = a * cosine_real_vs_fake + b * cosine_fake_1_vs_fake_2 + c * cosine_real_vs_real_init
-
-            loss += magnitude
-
-            loss_dict = {
-                'R-F_cos': cosine_real_vs_fake.item(),
-                'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
-                'R-Ri_cos': cosine_real_vs_real_init.item(),
-
-                '|Ri|': magnitude_real_init.item(),
-                '|R|': magnitude_real.item(),
-                '|F|': magnitude_fake.item(),
-
-                'Total': loss.item(),
-            }
+        magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
+        magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
+        magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
         
+        # Track
+        magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
+        magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
+        magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
+
+        magnitude = 0.5 * (magnitude_real + magnitude_fake)
+
+        # COSINE LOSS
+        # Minimize
+        cosine_real_1_vs_fake_1 = self._cosine_loss(real_features_1_MC, fake_features_1_MC, target_value=1, margin=0.1)
+        cosine_real_2_vs_fake_2 = self._cosine_loss(real_features_2_NC, fake_features_2_NC, target_value=1, margin=0.1)
+        cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N) # Equal weighting of each valid patch
+
+        # Maximize
+        cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
+        
+        # Anchor
+        cosine_real_1_vs_real_1_init = self._cosine_loss(real_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.2)
+        cosine_real_2_vs_real_2_init = self._cosine_loss(real_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.2)
+        cosine_real_vs_real_init = (M * cosine_real_1_vs_real_1_init + N * cosine_real_2_vs_real_2_init) / (M + N)
+        
+        a, b, c = self.options.contrastive_weights
+
+        loss = a * cosine_real_vs_fake + b * cosine_fake_1_vs_fake_2 + c * cosine_real_vs_real_init
+
+        loss += magnitude
+
+        loss_dict = {
+            'R-F_cos': cosine_real_vs_fake.item(),
+            'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
+            'R-Ri_cos': cosine_real_vs_real_init.item(),
+
+            '|Ri|': magnitude_real_init.item(),
+            '|R|': magnitude_real.item(),
+            '|F|': magnitude_fake.item(),
+
+            'Total': loss.item(),
+        }
+    
         return loss, loss_dict
-        
+    
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
 
@@ -848,17 +852,17 @@ if __name__ == "__main__":
 
 
     # Validation
-    for options.magnitude in (False, True):
-        for options.val_dataset_name in options.dataset_names:
+    # for options.magnitude in (False, True):
+    for options.val_dataset_name in options.dataset_names:
 
-            options.loss_function = 'separate'
+        options.loss_function = 'separate'
 
-            options.experiment_name = f"3d-median_val-mag{str(options.magnitude)}-{options.val_dataset_name}"
-            options.output_path = f"output_encoder/{options.experiment_name}"
+        options.experiment_name = f"3d-median_val-{options.val_dataset_name}"
+        options.output_path = f"output_encoder/{options.experiment_name}"
 
-            print(f'Training {options.experiment_name}')
-            trainer = TrainerEncoder(options)
-            val_loss = trainer.train()
+        print(f'Training {options.experiment_name}')
+        trainer = TrainerEncoder(options)
+        val_loss = trainer.train()
 
     #     for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
 
