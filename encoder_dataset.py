@@ -427,9 +427,13 @@ def custom_collate(batch):
         H = math.ceil(max_height / OUTPUT_SUBSAMPLE)
         W = math.ceil(max_width / OUTPUT_SUBSAMPLE)
 
+        offsetX = int(OUTPUT_SUBSAMPLE / 2)
+        offsetY = int(OUTPUT_SUBSAMPLE / 2)
+
         def _subsample_mask(mask, threshold=0.25, visualize=False):
 
-            mask_sub = F.interpolate(mask.float(), size=[H, W], mode='area') >= threshold
+            mask_sub = F.interpolate(mask.unsqueeze(0).float(), size=[H, W], mode='area')
+            mask_sub = mask_sub.squeeze(0) >= threshold
 
             if visualize:
                 import matplotlib.pyplot as plt
@@ -440,9 +444,21 @@ def custom_collate(batch):
             
             return mask_sub
 
+        mask_1_padded = _subsample_mask(mask_1_padded)
+        mask_2_padded = _subsample_mask(mask_2_padded)
+
+
         def _subsample_coords(coords, visualize=False):
 
-            coords_sub = F.interpolate(coords, size=[H, W], mode='nearest')
+            coords_sub = F.interpolate(coords.unsqueeze(0), size=[H, W], mode='nearest').squeeze(0)
+            # coords_sub = coords[:, offsetY::OUTPUT_SUBSAMPLE, offsetX::OUTPUT_SUBSAMPLE]
+
+            # if coords_sub.shape[1:] < (H, W):
+            #     print(f"Subsampled coords shape {coords_sub.shape} is smaller than target shape ({H}, {W})")
+            #     # pad remaining row/column with (0., 0., 0.) values
+            #     coords_sub = F.pad(coords_sub, (0, W - coords_sub.shape[2], 0, H - coords_sub.shape[1]))
+
+            # assert coords_sub.shape[1:] == (H, W), f"Subsampled coords shape {coords_sub.shape} does not match target shape ({H}, {W})"
 
             if visualize:
                 import matplotlib.pyplot as plt
@@ -454,16 +470,8 @@ def custom_collate(batch):
             
             return coords_sub
         
-
-        print(f'Masks shape before: {mask_1_padded.shape}, {mask_2_padded.shape}')
-        mask_1_padded = _subsample_mask(mask_1_padded)
-        mask_2_padded = _subsample_mask(mask_2_padded)
-        print(f'Masks shape after: {mask_1_padded.shape}, {mask_2_padded.shape}')
-
-        print(f'Coords shape before: {fake_coords_1_padded.shape}, {fake_coords_2_padded.shape}')
         fake_coords_1_padded = _subsample_coords(fake_coords_1_padded)
         fake_coords_2_padded = _subsample_coords(fake_coords_2_padded)
-        print(f'Coords shape after: {fake_coords_1_padded.shape}, {fake_coords_2_padded.shape}')
 
         # TODO: add batch visualization for subsampling: before vs after
 
@@ -487,20 +495,13 @@ def custom_collate(batch):
     fake_glob_1 = torch.stack(fake_glob_1)
     fake_glob_2 = torch.stack(fake_glob_2)
 
-
-    for i in range(1, len(names)):
-        assert names[i] == names[0]
-
-    name = names[0]
-
-    assert real_images_1_padded.shape == real_images_2_padded.shape == fake_images_1_padded.shape == fake_images_2_padded.shape == masks_1_padded.shape == masks_2_padded.shape, \
-        f"Shape mismatch: real 1 {real_images_1_padded.shape}, real 2 {real_images_2_padded.shape}," \
-            f"fake 1 {fake_images_1_padded.shape}, fake 2 {fake_images_2_padded.shape}," \
-            f"mask 1 {masks_1_padded.shape}, mask 2 {masks_2_padded.shape}"
+    assert real_images_1_padded.shape == real_images_2_padded.shape == fake_images_1_padded.shape == fake_images_2_padded.shape, \
+        f"Shape mismatch: real 1 {real_images_1_padded.shape}, real 2 {real_images_2_padded.shape}, fake 1 {fake_images_1_padded.shape}, fake 2 {fake_images_2_padded.shape},"
     
-    assert fake_coords_1_padded.shape[2:] == fake_images_1_padded.shape[2:], f"Shape mismatch: fake coords 1 {fake_coords_1_padded.shape}, fake image 1 {fake_images_1_padded.shape}"
+    assert masks_1_padded.shape[2:] == masks_2_padded.shape[2:] == fake_coords_1_padded.shape[2:] == fake_coords_2_padded.shape[2:], \
+        f"Shape mismatch: mask 1 {masks_1_padded.shape}, mask 2 {masks_2_padded.shape}, coords 1 {fake_coords_1_padded.shape}, coords 2 {fake_coords_2_padded.shape},"
 
-    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, idx_1, idx_2, name
+    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, idx_1, idx_2, names
 
 
 def coords_to_colors(coords):
@@ -562,7 +563,7 @@ if __name__ == '__main__':
 
         batch = custom_collate(batch)
 
-        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, name = batch
+        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, names = batch
 
         combined_masks = torch.logical_and(masks_1, masks_2)
 
