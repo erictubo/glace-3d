@@ -12,6 +12,8 @@ from skimage import io
 from skimage import color
 from skimage.transform import rotate
 
+from encoder_loss import coords_to_colors
+
 
 class RealFakeDataset(Dataset):
     """
@@ -496,24 +498,6 @@ def custom_collate(batch):
         f"Shape mismatch: mask 1 {masks_1_padded.shape}, mask 2 {masks_2_padded.shape}, coords 1 {fake_coords_1_padded.shape}, coords 2 {fake_coords_2_padded.shape},"
 
     return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, real_glob_1, real_glob_2, idx_1, idx_2, names
-
-
-def coords_to_colors(coords):
-    # 1. Convert coords to numpy array
-    coords = coords.permute(1, 2, 0).numpy()
-
-    # 2. Mask out zero values in coords
-    mask = np.all(coords == [0., 0., 0.], axis=-1)
-    masked_coords = np.ma.masked_array(coords, mask=np.repeat(mask[:, :, np.newaxis], 3, axis=2))
-
-    # 3. Normalize coords to [0, 1]
-    min_coords = np.floor(masked_coords.min(axis=(0, 1)))
-    max_coords = np.ceil(masked_coords.max(axis=(0, 1)))
-    normalized_coords = (masked_coords - min_coords) / (max_coords - min_coords)
-
-    normalized_coords = np.where(mask[:, :, np.newaxis], 1, normalized_coords)
-
-    return normalized_coords.astype(np.float32)
 
 
 if __name__ == '__main__':
