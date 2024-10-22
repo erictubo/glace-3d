@@ -66,10 +66,10 @@ class RealFakeDataset(Dataset):
 
         self.real_rgb_dir = root_dir / 'rgb real'
         self.fake_rgb_dir = root_dir / 'rgb fake'
-        self.poses_dir = root_dir / 'poses'
-        self.intrinsics_dir = root_dir / 'calibration'
-        self.fake_depth_dir = root_dir / 'depth'
-        # self.real_coords_dir = root_dir / 'init'
+        self.poses_dir = root_dir / 'poses'             # poses, same for real and fake
+        self.intrinsics_dir = root_dir / 'calibration'  # intrinsics, same for real and fake
+        self.fake_depth_dir = root_dir / 'depth fake'   # for fake scene coordinates
+        # self.real_coords_dir = root_dir / 'init real'   # for real scene coordinates
 
         self.real_global_features = np.load(root_dir / 'features real.npy')
         self.fake_global_features = np.load(root_dir / 'features fake.npy')
@@ -241,17 +241,18 @@ class RealFakeDataset(Dataset):
         # real_coords_1 = torch.load(self.real_coords_files[idx])
         # real_coords_2 = torch.load(self.real_coords_files[negative_idx])
         # print("Real coords shapes: ", real_coords_1.shape, real_coords_2.shape)
-        # TODO: how to handle subsampling? In dataset or in training loop?
+        # How to handle subsampling and augmentation, since coords already sparse?
         
         assert fake_coords_1.shape == fake_image_1.shape, f"Fake coords shape {fake_coords_1.shape} does not match image shape {fake_image_1.shape}"
         assert fake_coords_2.shape == fake_image_2.shape, f"Fake coords shape {fake_coords_2.shape} does not match image shape {fake_image_2.shape}"
 
         fake_glob_1 = torch.from_numpy(self.fake_global_features[idx]).float()
         fake_glob_2 = torch.from_numpy(self.fake_global_features[negative_idx]).float()
-        
-        # TODO: [IDEA] return as dictionary instead of tuple
 
-        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx, negative_idx
+        real_glob_1 = torch.from_numpy(self.real_global_features[idx]).float()
+        real_glob_2 = torch.from_numpy(self.real_global_features[negative_idx]).float()
+        
+        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, real_glob_1, real_glob_2, fake_glob_1, fake_glob_2, idx, negative_idx
         
     @staticmethod
     def _resize_image(image, target_height):
@@ -284,7 +285,7 @@ class RealFakeDataset(Dataset):
     
     def _get_single_item(self, idx, image_height, angle=None):
         try:
-            real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2 = self._load_image_set(idx)
+            real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, real_glob_1, real_glob_2, fake_glob_1, fake_glob_2, idx_1, idx_2 = self._load_image_set(idx)
         except Exception as e:
             logging.error(f"Error loading image trio at index {idx}: {str(e)}")
             raise
@@ -327,26 +328,26 @@ class RealFakeDataset(Dataset):
             if angle is None:
                 angle = random.uniform(-self.aug_rotation, self.aug_rotation)
 
-            real_image_1 = self._rotate_image(real_image_1, angle, 1, 'reflect')
-            real_image_2 = self._rotate_image(real_image_2, angle, 1, 'reflect')
-            fake_image_1 = self._rotate_image(fake_image_1, angle, 1, 'reflect')
-            fake_image_2 = self._rotate_image(fake_image_2, angle, 1, 'reflect')
-            mask_1 = self._rotate_image(mask_1, angle, 1, 'reflect')
-            mask_2 = self._rotate_image(mask_2, angle, 1, 'reflect')
-            fake_coords_1 = self._rotate_image(fake_coords_1, angle, 1, 'reflect')
-            fake_coords_2 = self._rotate_image(fake_coords_2, angle, 1, 'reflect')
+            real_image_1 = self._rotate_image(real_image_1, angle, 1, 'constant')
+            real_image_2 = self._rotate_image(real_image_2, angle, 1, 'constant')
+            fake_image_1 = self._rotate_image(fake_image_1, angle, 1, 'constant')
+            fake_image_2 = self._rotate_image(fake_image_2, angle, 1, 'constant')
+            mask_1 = self._rotate_image(mask_1, angle, 1, 'constant')
+            mask_2 = self._rotate_image(mask_2, angle, 1, 'constant')
+            fake_coords_1 = self._rotate_image(fake_coords_1, angle, 1, 'constant')
+            fake_coords_2 = self._rotate_image(fake_coords_2, angle, 1, 'constant')
+
         
         if self.use_half and torch.cuda.is_available():
-            # real_image_1 = real_image_1.half()
-            # real_image_2 = real_image_2.half()
-            # fake_image_1 = fake_image_1.half()
-            # fake_image_2 = fake_image_2.half()
-            # mask_1 = mask_1.half()
-            # mask_2 = mask_2.half()
-            # fake_coords_1 = fake_coords_1.half()
-            # fake_coords_2 = fake_coords_2.half()
+            real_image_1 = real_image_1.half()
+            real_image_2 = real_image_2.half()
+            fake_image_1 = fake_image_1.half()
+            fake_image_2 = fake_image_2.half()
 
-            pass
+            fake_glob_1 = fake_glob_1.half()
+            fake_glob_2 = fake_glob_2.half()
+            real_glob_1 = real_glob_1.half()
+            real_glob_2 = real_glob_2.half()
         
         mask_1 = mask_1 >= 0.25
         mask_2 = mask_2 >= 0.25
@@ -360,7 +361,7 @@ class RealFakeDataset(Dataset):
 
         assert fake_coords_1.shape[1:] == fake_image_1.shape[1:], f"Shape mismatch: fake coords 1 {fake_coords_1.shape}, fake image 1 {fake_image_1.shape}"
         
-        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, self.name
+        return real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, fake_coords_1, fake_coords_2, real_glob_1, real_glob_2, fake_glob_1, fake_glob_2, idx_1, idx_2, self.name
 
     def __getitem__(self, idx):
         if self.augment:
@@ -383,7 +384,7 @@ def custom_collate(batch):
     """
     Custom collate function for DataLoader that randomly pads images to the same size.
     """
-    real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, names = zip(*batch)
+    real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, real_glob_1, real_glob_2, idx_1, idx_2, names = zip(*batch)
 
     # Find max dimensions
     max_height = max([img.shape[1] for img in real_images_1])
@@ -415,11 +416,6 @@ def custom_collate(batch):
         mask_2_padded = pad_tensor(masks_2[i].float(), l_pad, r_pad, t_pad, b_pad).bool()
         fake_coords_1_padded = pad_tensor(fake_coords_1[i], l_pad, r_pad, t_pad, b_pad)
         fake_coords_2_padded = pad_tensor(fake_coords_2[i], l_pad, r_pad, t_pad, b_pad)
-
-
-        # TODO: subsample masks and coords to feature size
-        # masks: interpolate area with threshold - shape: 1xHxW
-        # coords: interpolate nearest - shape: 3xHxW
         
         OUTPUT_SUBSAMPLE = 8
         import math
@@ -473,10 +469,6 @@ def custom_collate(batch):
         fake_coords_1_padded = _subsample_coords(fake_coords_1_padded)
         fake_coords_2_padded = _subsample_coords(fake_coords_2_padded)
 
-        # TODO: add batch visualization for subsampling: before vs after
-
-        # TODO: add visualization of all batch data (see in __main__ below)
-
         padded_images.append((real_image_1_padded, real_image_2_padded, fake_image_1_padded, fake_image_2_padded, mask_1_padded, mask_2_padded, fake_coords_1_padded, fake_coords_2_padded))
 
     # Unzip the padded images
@@ -494,6 +486,8 @@ def custom_collate(batch):
 
     fake_glob_1 = torch.stack(fake_glob_1)
     fake_glob_2 = torch.stack(fake_glob_2)
+    real_glob_1 = torch.stack(real_glob_1)
+    real_glob_2 = torch.stack(real_glob_2)
 
     assert real_images_1_padded.shape == real_images_2_padded.shape == fake_images_1_padded.shape == fake_images_2_padded.shape, \
         f"Shape mismatch: real 1 {real_images_1_padded.shape}, real 2 {real_images_2_padded.shape}, fake 1 {fake_images_1_padded.shape}, fake 2 {fake_images_2_padded.shape},"
@@ -501,7 +495,7 @@ def custom_collate(batch):
     assert masks_1_padded.shape[2:] == masks_2_padded.shape[2:] == fake_coords_1_padded.shape[2:] == fake_coords_2_padded.shape[2:], \
         f"Shape mismatch: mask 1 {masks_1_padded.shape}, mask 2 {masks_2_padded.shape}, coords 1 {fake_coords_1_padded.shape}, coords 2 {fake_coords_2_padded.shape},"
 
-    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, idx_1, idx_2, names
+    return real_images_1_padded, real_images_2_padded, fake_images_1_padded, fake_images_2_padded, masks_1_padded, masks_2_padded, fake_coords_1_padded, fake_coords_2_padded, fake_glob_1, fake_glob_2, real_glob_1, real_glob_2, idx_1, idx_2, names
 
 
 def coords_to_colors(coords):
@@ -543,7 +537,7 @@ if __name__ == '__main__':
         fig, ax = plt.subplots(4, 8)
 
         for i, sample in enumerate(batch):
-            real_1, real_2, fake_1, fake_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, name = sample
+            real_1, real_2, fake_1, fake_2, mask_1, mask_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, real_glob_1, real_glob_2, idx_1, idx_2, name = sample
 
             combined_mask = torch.logical_and(mask_1, mask_2)
 
@@ -563,7 +557,7 @@ if __name__ == '__main__':
 
         batch = custom_collate(batch)
 
-        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, idx_1, idx_2, names = batch
+        real_images_1, real_images_2, fake_images_1, fake_images_2, masks_1, masks_2, fake_coords_1, fake_coords_2, fake_glob_1, fake_glob_2, real_glob_1, real_glob_2, idx_1, idx_2, names = batch
 
         combined_masks = torch.logical_and(masks_1, masks_2)
 
