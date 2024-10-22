@@ -15,9 +15,10 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 
-
-from ace_network import Encoder, Head
+from ace_network import Encoder, Head, Regressor
 from encoder_dataset import RealFakeDataset, custom_collate
+from encoder_loss import coords_loss, magnitude_loss, cosine_loss, mask_features
+
 
 _logger = logging.getLogger(__name__)
 
@@ -67,14 +68,6 @@ class TrainerEncoder:
         
         encoder_state_dict = torch.load(self.options.encoder_path, map_location="cpu")
 
-        # Encoder to be fine-tuned
-        self.encoder = Encoder()
-        self.encoder.load_state_dict(encoder_state_dict)
-        self.encoder.to(self.device)
-
-        _logger.info(f"Loaded pretrained encoder from: {self.options.encoder_path}")
-
-
         # Encoder (static) to be used for reference
         self.initial_encoder = Encoder()
         self.initial_encoder.load_state_dict(encoder_state_dict)
@@ -84,21 +77,59 @@ class TrainerEncoder:
         for param in self.initial_encoder.parameters():
             param.requires_grad = False
 
+        
+        # OPTION A: Load encoder and heads separately, for multiple datasets
+
+        # Encoder to be fine-tuned
+        self.encoder = Encoder()
+        self.encoder.load_state_dict(encoder_state_dict)
+        self.encoder.to(self.device)
+
+        _logger.info(f"Loaded pretrained encoder from: {self.options.encoder_path}")
+
         # Create head for each dataset
         self.heads = {}
         for dataset_name, head_path in self.options.head_paths.items():
             head_state_dict = torch.load(head_path, map_location="cpu")
             self.heads[dataset_name] = Head.create_from_state_dict(head_state_dict)
             self.heads[dataset_name].to(self.device)
+            # self.heads[dataset_name].eval()
 
             for param in self.heads[dataset_name].parameters():
                 param.requires_grad = False
         
             _logger.info(f"Loaded prediction head for {dataset_name} from: {head_path}")
 
+        params_to_optimize = list(self.encoder.parameters())
+
+
+        # TEST OPTION B: Load encoder and head together as regressor, for single dataset (first in list)
+        # If activating, need to adjust self.encoder and self.heads operations to use self.regressor
+
+        # # Single head / dataset
+        # head_state_dict = torch.load(self.options.head_paths[options.dataset_names[0]], map_location="cpu")
+
+        # self.regressor = Regressor.create_from_split_state_dict(encoder_state_dict, head_state_dict)
+        # self.regressor.to(self.device)
+
+        # for param in self.regressor.heads.parameters():
+        #     param.requires_grad = False
+
+        # _logger.info(f"Loaded regressor from {self.options.head_paths[options.dataset_names[0]]}")
+
+        # params_to_optimize = self.regressor.encoder.parameters()
+
+
+        # Optimizer
+        self.optimizer = AdamW(
+            filter(lambda p: p.requires_grad, params_to_optimize),
+            lr=self.options.learning_rate,
+            # weight_decay=self.options.weight_decay,
+        )
         # Dataset
         self.val_dataset, self.train_dataset, weights = self._load_datasets()
         _logger.info(f"Loaded training and validation datasets")
+
 
         # Sampler to represent datasets equally
         sampler = WeightedRandomSampler(
@@ -121,6 +152,18 @@ class TrainerEncoder:
         #     collate_fn=custom_collate,
         # )
 
+        # Learning rate scheduler
+        self.scheduler = LinearLR(
+            self.optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=self.options.num_epochs * int(len(self.train_dataset) / self.options.gradient_accumulation_steps),
+        )
+
+        # Gradient scaler
+        self.scaler = GradScaler(enabled=self.options.use_half)
+
+
         # Loss function
         if self.options.loss_function == 'separate':
             self._compute_loss = self._compute_separate_loss
@@ -128,24 +171,6 @@ class TrainerEncoder:
             self._compute_loss = self._compute_combined_loss
         else:
             raise ValueError(f"Invalid loss function: {self.options.loss_function}")
-
-        # Optimizer
-        self.optimizer = AdamW(
-            filter(lambda p: p.requires_grad, self.encoder.parameters()),
-            lr=self.options.learning_rate,
-            weight_decay=self.options.weight_decay,
-        )
-
-        # Learning rate scheduler
-        self.scheduler = LinearLR(
-            self.optimizer,
-            start_factor=1.0,
-            end_factor=0.2,
-            total_iters=self.options.num_epochs * int(len(self.train_dataset) / self.options.gradient_accumulation_steps),
-        )
-
-        # Gradient scaler
-        self.scaler = GradScaler(enabled=self.options.use_half)
 
 
         # Tensorboard logger
@@ -158,11 +183,12 @@ class TrainerEncoder:
             'val_dataset_size': len(self.val_dataset),
 
             'learning_rate': options.learning_rate,
-            'weight_decay': options.weight_decay,
+            # 'weight_decay': options.weight_decay,
 
             'num_epochs' : options.num_epochs,
             'batch_size': options.batch_size,
             'gradient_accumulation_samples': options.gradient_accumulation_samples,
+            'clip_norm': options.clip_norm,
 
             'use_half': options.use_half,
             'image_height': options.image_height,
@@ -171,8 +197,22 @@ class TrainerEncoder:
             'aug_scale_max': options.aug_scale_max,
             
             'loss_function': options.loss_function,
-            'contrastive_weights': options.contrastive_weights,
         }
+
+        # assert that at least one of coords, magnitude, cosine is loss
+        assert 'loss' in [options.use_coords, options.use_cosine], "At least one of coords or cosine must be used as loss"
+
+        print(f'Using coords as {options.use_coords} and cosine as {options.use_cosine}')
+
+        if options.use_cosine == 'loss':
+            config['cosine_weights'] = options.cosine_weights
+            print(f'Cosine weights: {options.cosine_weights}')
+        if options.use_coords == 'loss':
+            config['coords_scale'] = options.coords_scale
+            print(f'Coords scale: {options.coords_scale}')
+
+        print(f'Using magnitude as {options.use_magnitude}')
+
 
         self.logger = TensorBoardLogger(
             log_dir='runs/' + options.experiment_name,
@@ -263,7 +303,6 @@ class TrainerEncoder:
             else:
                 self.val_dataset.set_epoch(self.epoch)
 
-
             self.encoder.train()
             train_loss = self._train_epoch()
 
@@ -312,21 +351,52 @@ class TrainerEncoder:
                 loss /= self.options.gradient_accumulation_steps
                 self.scaler.scale(loss).backward()
 
-                # Check gradients
-                for name, param in self.encoder.named_parameters():
-                    if param.grad is None:
-                        print(f"No gradient for {name}")
-                    elif torch.isnan(param.grad).any():
-                        print(f"NaN gradient for {name}")
+                # # Check head gradients
+                # for dataset_name in set(dataset_names):
+                #     head = self.heads[dataset_name]
+                #     for name, param in head.named_parameters():
+                #         if param.grad is None:
+                #             print(f"No gradient for head ({dataset_name}): {name}")
+                #         elif torch.isnan(param.grad).any():
+                #             print(f"NaN gradient for head ({dataset_name}): {name}")
+                #         else:
+                #             print(f"OK gradient for head ({dataset_name}): {name}")
+
+                # # Check encoder gradients         
+                # for name, param in self.encoder.named_parameters():
+                #     if param.grad is None:
+                #         print(f"No gradient for encoder: {name}")
+                #     elif torch.isnan(param.grad).any():
+                #         print(f"NaN gradient for encoder {name}")
+                #     else:
+                #         print(f"OK gradient for encoder {name}")
+
+                # check that not all gradients are zero / NaN
+                if all(param.grad is None or torch.isnan(param.grad).all() for param in self.encoder.parameters()):
+                    print("All encoder gradients are None or NaN")
+                    break
 
                 # Gradient accumulation
                 if self.iteration % self.options.gradient_accumulation_steps == 0:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad()
 
+                    # Clip gradients
                     total_norm = self._compute_gradient_norm()
                     self.logger.writer.add_scalar('gradient_norm', total_norm, self.iteration)
+
+                    if self.options.clip_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_norm=self.options.clip_norm)
+                        print("Clipping gradients ...")
+                        clipped_norm = self._compute_gradient_norm()
+                        print(f"Norm before clipping: {total_norm:.6f}, after clipping: {clipped_norm:.6f}")
+                        self.logger.writer.add_scalar('clipped_gradient_norm', clipped_norm, self.iteration)
+
+                    self.optimizer.step()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    self.optimizer.zero_grad(set_to_none=True)
+
+                    self.log_weight_changes()
 
                     # Log average losses
                     avg_loss_dict = {k: v / self.options.gradient_accumulation_steps for k, v in accumulated_loss_dict.items()}
@@ -405,163 +475,238 @@ class TrainerEncoder:
 
         return total_loss / len(val_loader), avg_loss_dict
 
-    """
-    LOSS FUNCTIONS
-    """
-    
-    def _magnitude_loss(self, features, target_value=1.0, margin=0.15):
-
-        magnitude = torch.mean(torch.norm(features, p=2, dim=1))
-
-        return F.relu(torch.abs(target_value - magnitude) - margin)
-    
-        # feature_norms = torch.norm(features, dim=1)
-        # losses = F.relu(torch.abs(target_value - feature_norms) - margin)
-
-        # return losses.mean()
-
-    # def _mse_loss(self, features_1, features_2, target_value=0.0, margin=0.0, p=1):
-
-    #     features_1 = F.normalize(features_1, p=p, dim=1)
-    #     features_2 = F.normalize(features_2, p=p, dim=1)
-
-    #     mse = F.mse_loss(features_1, features_2, reduction='none')
-
-    #     losses = F.relu(torch.abs(target_value - mse) - margin)
-
-    #     return losses.mean()
-    
-    # def _mae_loss(self, features_1, features_2, target_value=0.0, margin=0.0, smooth=True, p=1):
-
-    #     features_1 = F.normalize(features_1, p=p, dim=1)
-    #     features_2 = F.normalize(features_2, p=p, dim=1)
-
-    #     if smooth:
-    #         mae = F.smooth_l1_loss(features_1, features_2, reduction='none')
-    #     else:
-    #         mae = F.l1_loss(features_1, features_2, reduction='none')
-
-    #     losses = F.relu(torch.abs(target_value - mae) - margin)
-
-    #     return losses.mean()
-    
-    def _cosine_loss(self, features_1, features_2, target_value=1, margin=0.1):
-
-        cos_sim = F.cosine_similarity(features_1, features_2, dim=1)
-
-        losses = F.relu(torch.abs(target_value - cos_sim) - margin)
-
-        return losses.mean()
-    
-    # def _diversity_loss(self, features, feature_mask):
-    #     B, C, H, W = features.shape
-        
-    #     # Reshape features
-    #     features_reshaped = features.view(B, C, -1)  # Shape: (B, C, H*W)
-        
-    #     # Reshape mask_1
-    #     mask_reshaped = feature_mask.view(B, 1, -1)  # Shape: (B, 1, H*W)
-        
-    #     # Apply mask_1
-    #     features_masked = features_reshaped * mask_reshaped  # Broadcasting the mask_1
-        
-    #     # Normalize features
-    #     features_norm = F.normalize(features_masked, p=2, dim=1)
-        
-    #     # Compute similarity matrix
-    #     similarity_matrix = torch.bmm(features_norm, features_norm.transpose(1, 2))
-        
-    #     # Compute diversity loss
-    #     eye = torch.eye(C, device=features.device).unsqueeze(0).expand(B, -1, -1)
-    #     diversity_loss = torch.mean((similarity_matrix - eye) ** 2)
-
-    #     return diversity_loss
-
-    # def _spatial_consistency_loss(self, features, feature_mask):
-
-    #     assert len(features.shape) == 4, features.shape
-    #     B, C, H, W = features.shape
-
-    #     mask_B1HW = feature_mask
-    #     mask_BCHW = mask_B1HW.expand(-1, C, -1, -1)
-
-    #     assert mask_BCHW.shape == (B, C, H, W), mask_BCHW.shape
-        
-    #     # Compute gradients in x and y directions
-    #     grad_x = features[:, :, :, 1:] - features[:, :, :, :-1]
-    #     grad_y = features[:, :, 1:, :] - features[:, :, :-1, :]
-
-    #     # Update mask_1 to exclude border pixels (where gradients are not valid)
-    #     mask_x = mask_BCHW[:, :, :, 1:] & mask_BCHW[:, :, :, :-1]
-    #     mask_y = mask_BCHW[:, :, 1:, :] & mask_BCHW[:, :, :-1, :]
-
-    #     # mask_1 gradients
-    #     grad_x_masked = grad_x[mask_x]
-    #     grad_y_masked = grad_y[mask_y]
-
-    #     # Compute total variation
-    #     return torch.mean(torch.abs(grad_x_masked)) + torch.mean(torch.abs(grad_y_masked))
-
-    # def _triplet_loss(self, anchor, positive, negative, margin=0.2):
-
-    #     distance_positive = F.pairwise_distance(anchor, positive, p=2)
-    #     distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
-
-    #     losses = F.relu(distance_positive - distance_negative + margin)
-
-    #     return losses.mean()
-        
-    @staticmethod
-    def _mask_features(features_list, feature_mask):
+    def _compute_separate_loss(self, batch, mode):
         """
-        Mask features to valid values only, reshaping to 2D tensor.\\
-        Input: features_list (shape BxCxHxW each), feature_mask (shape Bx1xHxW)\\
-        Output: valid_features_list (shape MxC each, where M is the number of valid patches, M <= N = B*H*W)
+        Loss for training a separate encoder for real (pre-trained) and fake images (fine-tuned):
+        A) make fake_features similar to real_init_features (real_vs_fake),
+        B) keep fake_features_1 and fake_features_2 distinct (fake_1_vs_fake_2),
+        + Maintain magntiude of features close to 1.0.
         """
 
-        B, C, H, W = features_list[0].shape
+        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, gt_fake_coords_1, gt_fake_coords_2, real_glob_1, real_glob_2, fake_glob_1, fake_glob_2, idx_1, idx_2, dataset_names = batch
 
-        for features in features_list:
-            assert features.shape == (B, C, H, W), features.shape
+        assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
-        def normalize_shape(tensor_in):
-            """Bring tensor from shape BxCxHxW to NxC"""
-            return tensor_in.transpose(0, 1).flatten(1).transpose(0, 1)
+        assert mode in ['training', 'validation']
+
+        with torch.no_grad():
+            real_init_features_1 = self.initial_encoder(real_image_1)
+            real_init_features_2 = self.initial_encoder(real_image_2)
+
+        with torch.no_grad() if mode=='validation' else torch.enable_grad():
+            fake_features_1 = self.encoder(fake_image_1)
+            fake_features_2 = self.encoder(fake_image_2)
+
+        # assert that mask shape and coords shape match features shape
+        assert mask_1.shape[2:] == gt_fake_coords_1.shape[2:] == fake_features_1.shape[2:], f"{mask_1.shape} != {gt_fake_coords_1.shape} != {fake_features_1.shape}"
+        assert mask_2.shape[2:] == gt_fake_coords_2.shape[2:] == fake_features_2.shape[2:], f"{mask_2.shape} != {gt_fake_coords_2.shape} != {fake_features_2.shape}"
+
+
+        loss = 0
+        loss_dict = {}
+
+
+        # 3D LOSS
+        if self.options.use_coords in ['track', 'loss']:
+
+            with torch.no_grad() if mode=='validation' else torch.enable_grad():
+                pred_fake_coords_1 = self._predict_coords(fake_features_1, fake_glob_1, dataset_names)
+                pred_fake_coords_2 = self._predict_coords(fake_features_2, fake_glob_2, dataset_names)
+
+            fake_coords_1_loss, V1 = coords_loss(gt_fake_coords_1, pred_fake_coords_1, median=self.options.median)
+            fake_coords_2_loss, V2 = coords_loss(gt_fake_coords_2, pred_fake_coords_2, median=self.options.median)
+            fake_coords_loss = (V1 * fake_coords_1_loss + V2 * fake_coords_2_loss) / (V1 + V2)
+
+            loss_dict['F_3D'] = fake_coords_loss.item()
+
+            if self.options.use_coords == 'loss':
+                loss += fake_coords_loss * self.options.coords_scale
+
+
+        # MASKING
+        if self.options.use_magnitude in ['track', 'loss'] or self.options.use_cosine in ['track', 'loss']:
+
+            mask_combined = torch.logical_and(mask_1, mask_2)
+
+            (real_init_features_1_MC, fake_features_1_MC), M = mask_features([real_init_features_1, fake_features_1], mask_1)
+            (real_init_features_2_NC, fake_features_2_NC), N = mask_features([real_init_features_2, fake_features_2], mask_2)
+
+            (real_init_features_1_OC, fake_features_1_OC, real_init_features_2_OC, fake_features_2_OC), O = \
+                mask_features([real_init_features_1, fake_features_1, real_init_features_2, fake_features_2], mask_combined)
+
+
+        # COSINE LOSS
+        if self.options.use_cosine in ['track', 'loss']:
+            
+            # Minimize
+            cosine_fake_1_vs_real_1_init = cosine_loss(fake_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.1)
+            cosine_fake_2_vs_real_2_init = cosine_loss(fake_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.1)
+            cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N) # Equal weighting of each valid patch
+
+            loss_dict['F-Ri_cos'] = cosine_fake_vs_real_init.item()
+
+            # Maximize
+            cosine_fake_1_vs_fake_2 = cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
+
+            loss_dict['F1-F2_cos'] = cosine_fake_1_vs_fake_2.item()
+
+            # Track
+            cosine_real_1_init_vs_real_2_init = cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
+
+            loss_dict['R1i-R2i_cos'] = cosine_real_1_init_vs_real_2_init.item()
+
+            if self.options.use_cosine == 'loss':
+                a, b = self.options.cosine_weights
+                loss += a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
+            
+
+        # MAGNITUDE LOSS
+        if self.options.use_magnitude in ['track', 'loss']:
+
+            magnitude_real_1_init = magnitude_loss(real_init_features_1_MC)
+            magnitude_real_2_init = magnitude_loss(real_init_features_2_NC)
+            magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
+
+            loss_dict['|Ri|'] = magnitude_real_init.item() # Only tracking
+
+            magnitude_fake_1 = magnitude_loss(fake_features_1_MC)
+            magnitude_fake_2 = magnitude_loss(fake_features_2_NC)
+            magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
+
+            loss_dict['|F|'] = magnitude_fake.item()
+
+            if self.options.use_magnitude == 'loss':
+                loss += magnitude_fake
+
         
-        feature_mask_N1 = normalize_shape(feature_mask)
+        loss_dict['Total'] = loss.item()
 
-        assert feature_mask_N1.shape == (B*H*W, 1), feature_mask.shape
+        return loss, loss_dict
+    
+    def _compute_combined_loss(self, batch, mode):
+        """
+        Loss for training a combined encoder (real and fake images share the same fine-tuned encoder):
+        A) make fake_features similar to real_features (real_vs_fake),
+        B) keep fake_features_1 and fake_features_2 distinct (fake_1_vs_fake_2),
+        C) anchor real_features to real_init_features (real_vs_real_init),
+        + Maintain magntiude of features close to 1.0.
+        """
 
-        feature_mask_NC = feature_mask_N1.expand(B*H*W, C)
-
-        assert feature_mask_NC.shape == (B*H*W, C), feature_mask_NC.shape
-
-        features_NC_list = [normalize_shape(features) for features in features_list]
-
-        def apply_mask(features_NC, mask_NC):
-            valid_features = features_NC[mask_NC]
-
-            N, C = features_NC.shape
-
-            return valid_features.reshape(-1, C)
-
-        valid_features_list = [apply_mask(features_NC, feature_mask_NC) for features_NC in features_NC_list]
-
-        M, C = valid_features_list[0].shape
-
-        for valid_features in valid_features_list:
-            assert valid_features.shape == (M, C), valid_features.shape
+        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, gt_fake_coords_1, gt_fake_coords_2, real_glob_1, real_glob_2, fake_glob_1, fake_glob_2, idx_1, idx_2, dataset_names = batch
         
-        N = B*H*W
-        assert M <= N, f"Masked size {M} larger than {N} = {B}*{H}*{W}"
-        if M == N:
-            print('M=N so mean feature mask_1 should be equal to 1.0:')
-            try: print(feature_mask.float().mean())
-            except: print('error in mean calculation')
-        
-        assert(len(valid_features_list) == len(features_list))
+        assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
 
-        return valid_features_list, M
+        assert mode in ['training', 'validation']
+
+        with torch.no_grad():
+            real_init_features_1 = self.initial_encoder(real_image_1)
+            real_init_features_2 = self.initial_encoder(real_image_2)
+
+        with torch.no_grad() if mode=='validation' else torch.enable_grad():
+            real_features_1 = self.encoder(real_image_1)
+            real_features_2 = self.encoder(real_image_2)
+            fake_features_1 = self.encoder(fake_image_1)
+            fake_features_2 = self.encoder(fake_image_2)
+
+        assert mask_1.shape[2:] == gt_fake_coords_1.shape[2:] == real_features_1.shape[2:], f"{mask_1.shape} != {gt_fake_coords_1.shape} != {real_features_1.shape}"
+        assert mask_2.shape[2:] == gt_fake_coords_2.shape[2:] == real_features_2.shape[2:], f"{mask_2.shape} != {gt_fake_coords_2.shape} != {real_features_2.shape}"
+
+
+        loss = 0
+        loss_dict = {}
+
+
+        # 3D LOSS
+        if self.options.use_coords in ['track', 'loss']:
+
+            with torch.no_grad() if mode=='validation' else torch.enable_grad():
+                pred_fake_coords_1 = self._predict_coords(fake_features_1, fake_glob_1, dataset_names)
+                pred_fake_coords_2 = self._predict_coords(fake_features_2, fake_glob_2, dataset_names)
+
+                # Combined: using same fine-tuned encoder
+                pred_real_coords_1 = self._predict_coords(real_features_1, real_glob_1, dataset_names)
+                pred_real_coords_2 = self._predict_coords(real_features_2, real_glob_2, dataset_names)
+
+            fake_coords_1_loss, V1 = coords_loss(gt_fake_coords_1, pred_fake_coords_1, median=self.options.median)
+            fake_coords_2_loss, V2 = coords_loss(gt_fake_coords_2, pred_fake_coords_2, median=self.options.median)
+            fake_coords_loss = (V1 * fake_coords_1_loss + V2 * fake_coords_2_loss) / (V1 + V2)
+
+            loss_dict['F_3D'] = fake_coords_loss.item()
+
+            real_coords_1_loss, V3 = coords_loss(gt_fake_coords_1, pred_real_coords_1, median=self.options.median)
+            real_coords_2_loss, V4 = coords_loss(gt_fake_coords_2, pred_real_coords_2, median=self.options.median)
+            real_coords_loss = (V3 * real_coords_1_loss + V4 * real_coords_2_loss) / (V3 + V4)
+
+            loss_dict['R_3D'] = real_coords_loss.item()
+
+            if self.options.use_coords == 'loss':
+                loss += 0.5 * (fake_coords_loss + real_coords_loss) * self.options.coords_scale
+
+
+        # MASKING
+        if self.options.use_magnitude in ['track', 'loss'] or self.options.use_cosine in ['track', 'loss']:
+
+            mask_combined = torch.logical_and(mask_1, mask_2)
+
+            (real_init_features_1_MC, real_features_1_MC, fake_features_1_MC), M = mask_features([real_init_features_1, real_features_1, fake_features_1], mask_1)
+            (real_init_features_2_NC, real_features_2_NC, fake_features_2_NC), N = mask_features([real_init_features_2, real_features_2, fake_features_2], mask_2)
+            (fake_features_1_OC, fake_features_2_OC), O = mask_features([fake_features_1, fake_features_2], mask_combined)
+
+
+        # MAGNITUDE
+        if self.options.use_magnitude in ['track', 'loss']:
+
+            magnitude_real_1_init = magnitude_loss(real_init_features_1_MC)
+            magnitude_real_2_init = magnitude_loss(real_init_features_2_NC)
+            magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
+
+            loss_dict['|Ri|'] = magnitude_real_init.item()
+
+            magnitude_real_1 = magnitude_loss(real_features_1_MC)
+            magnitude_real_2 = magnitude_loss(real_features_2_NC)
+            magnitude_real = 0.5 * (magnitude_real_1 + magnitude_real_2)
+
+            loss_dict['|R|'] = magnitude_real.item()
+
+            magnitude_fake_1 = magnitude_loss(fake_features_1_MC)
+            magnitude_fake_2 = magnitude_loss(fake_features_2_NC)
+            magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
+            
+            loss_dict['|F|'] = magnitude_fake.item()
+
+            if self.options.use_magnitude == 'loss':
+                loss += 0.5 * (magnitude_real + magnitude_fake)
+
+
+        # COSINE LOSS
+        if self.options.use_cosine in ['track', 'loss']:
+            # Minimize
+            cosine_real_1_vs_fake_1 = cosine_loss(real_features_1_MC, fake_features_1_MC, target_value=1, margin=0.1)
+            cosine_real_2_vs_fake_2 = cosine_loss(real_features_2_NC, fake_features_2_NC, target_value=1, margin=0.1)
+            cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N) # Equal weighting of each valid patch
+
+            loss_dict['R-F_cos'] = cosine_real_vs_fake.item()
+
+            # Maximize
+            cosine_fake_1_vs_fake_2 = cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
+            
+            loss_dict['F1-F2_cos'] = cosine_fake_1_vs_fake_2.item()
+
+            # Anchor
+            cosine_real_1_vs_real_1_init = cosine_loss(real_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.2)
+            cosine_real_2_vs_real_2_init = cosine_loss(real_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.2)
+            cosine_real_vs_real_init = (M * cosine_real_1_vs_real_1_init + N * cosine_real_2_vs_real_2_init) / (M + N)
+
+            loss_dict['R-Ri_cos'] = cosine_real_vs_real_init.item()
+
+            if self.options.use_cosine == 'loss':
+                a, b, c = self.options.cosine_weights
+                loss += a * cosine_real_vs_fake + b * cosine_fake_1_vs_fake_2 + c * cosine_real_vs_real_init
+
+
+        loss_dict['Total'] = loss.item()
+    
+        return loss, loss_dict
 
     def _predict_coords(self, local_features, global_features, dataset_names):
         """
@@ -580,253 +725,48 @@ class TrainerEncoder:
             pred_coords_list.append(pred_coords.squeeze(0))
         
         return torch.stack(pred_coords_list, dim=0)
-
-    def _coords_loss(self, gt_coords, pred_coords, visualize=False):
-        """
-        Compute the loss between predicted and ground truth coordinates.
-        """
-        assert pred_coords.shape == gt_coords.shape, f"{pred_coords.shape} != {gt_coords.shape}"
-
-        distance = torch.norm(gt_coords - pred_coords, p=2, dim=1)
-        valid_coords = (gt_coords.sum(dim=1) != 0)
-        distance_valid = distance[valid_coords]
-
-        if visualize:
-            import matplotlib.pyplot as plt
-            from encoder_dataset import coords_to_colors
-
-            difference = distance.cpu().numpy()
-            valid = valid_coords.cpu().numpy()
-            masked_difference = np.ma.masked_array(difference, mask=~valid)
-
-            cmap = plt.get_cmap('Spectral').reversed()
-            cmap.set_bad(color='white')
-            fig, ax = plt.subplots(self.options.batch_size, 3)
-            for i in range(self.options.batch_size):
-                ax[i, 0].imshow(coords_to_colors(gt_coords[i].cpu()))
-                ax[i, 1].imshow(coords_to_colors(pred_coords[i].cpu()))
-                ax[i, 2].imshow(masked_difference[i], cmap=cmap)
-            plt.show()
-
-        V = distance_valid.size(0)
-
-        return distance_valid.median(), V
-
-    def _compute_separate_loss(self, batch, mode):
-        """
-        Loss for training a separate encoder:
-        A) make fake_features similar to real_init_features (real_vs_fake),
-        B) keep fake_features_1 and fake_features_2 distinct (fake_1_vs_fake_2),
-        + Maintain magntiude of features close to 1.0.
-        """
-
-        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, gt_coords_1, gt_coords_2, global_features_1, global_features_2, idx_1, idx_2, dataset_names = batch
-
-        mask_combined = torch.logical_and(mask_1, mask_2)
-
-        assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
-
-        assert mode in ['training', 'validation']
-
-        with torch.no_grad():
-            real_init_features_1 = self.initial_encoder(real_image_1)
-            real_init_features_2 = self.initial_encoder(real_image_2)
-
-        with torch.no_grad() if mode=='validation' else torch.enable_grad():
-            fake_features_1 = self.encoder(fake_image_1)
-            fake_features_2 = self.encoder(fake_image_2)
-
-            # assert that mask shape and coords shape match features shape
-            assert mask_1.shape[2:] == gt_coords_1.shape[2:] == fake_features_1.shape[2:], f"{mask_1.shape} != {gt_coords_1.shape} != {fake_features_1.shape}"
-            assert mask_2.shape[2:] == gt_coords_2.shape[2:] == fake_features_2.shape[2:], f"{mask_2.shape} != {gt_coords_2.shape} != {fake_features_2.shape}"
-
-            pred_coords_1 = self._predict_coords(fake_features_1, global_features_1, dataset_names)
-            pred_coords_2 = self._predict_coords(fake_features_2, global_features_2, dataset_names)
-
-        # 3D LOSS
-        coords_1_loss, V1 = self._coords_loss(gt_coords_1, pred_coords_1)
-        coords_2_loss, V2 = self._coords_loss(gt_coords_2, pred_coords_2)
-        coords_loss = (V1 * coords_1_loss + V2 * coords_2_loss) / (V1 + V2)
-
-        print("Coords loss:", coords_loss)
-
-        # MASKING
-        (real_init_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, fake_features_1], mask_1)
-        (real_init_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, fake_features_2], mask_2)
-
-        (real_init_features_1_OC, fake_features_1_OC, real_init_features_2_OC, fake_features_2_OC), O = \
-            self._mask_features([real_init_features_1, fake_features_1, real_init_features_2, fake_features_2], mask_combined)
-
-        # MAGNITUDE LOSS
-        magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
-        magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
-        magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
-
-        magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
-        magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
-        magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
-
-        magnitude = magnitude_fake
-
-        # COSINE LOSS
-        # Minimize
-        cosine_fake_1_vs_real_1_init = self._cosine_loss(fake_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.1)
-        cosine_fake_2_vs_real_2_init = self._cosine_loss(fake_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.1)
-        cosine_fake_vs_real_init = (M * cosine_fake_1_vs_real_1_init + N * cosine_fake_2_vs_real_2_init) / (M + N) # Equal weighting of each valid patch
-
-        # Maximize
-        cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
-
-        # Track
-        cosine_real_1_init_vs_real_2_init = self._cosine_loss(real_init_features_1_OC, real_init_features_2_OC, target_value=-1, margin=0.3)
-
-        # a, b = self.options.contrastive_weights
-
-        # loss = a * (cosine_fake_vs_real_init) + b * (cosine_fake_1_vs_fake_2)
-
-        loss = coords_loss # / 50
-
-        # if self.options.magnitude:
-        #     loss += magnitude
-
-        loss_dict = {
-            'F_3D' : coords_loss.item(),
-
-            'F-Ri_cos': cosine_fake_vs_real_init.item(),
-            'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
-            'R1i-R2i_cos': cosine_real_1_init_vs_real_2_init.item(),
-
-            '|F|': magnitude_fake.item(),
-            '|Ri|': magnitude_real_init.item(),
-
-            'Total': loss.item(),
-        }
-
-        return loss, loss_dict
-    
-    def _compute_combined_loss(self, batch, mode):
-        """
-        Loss for training a combined encoder:
-        A) make fake_features similar to real_features (real_vs_fake),
-        B) keep fake_features_1 and fake_features_2 distinct (fake_1_vs_fake_2),
-        C) anchor real_features to real_init_features (real_vs_real_init),
-        + Maintain magntiude of features close to 1.0.
-        """
-
-        real_image_1, real_image_2, fake_image_1, fake_image_2, mask_1, mask_2, gt_coords_1, gt_coords_2, global_features_1, global_features_2, idx_1, idx_2, dataset_name = batch
-
-        mask_combined = torch.logical_and(mask_1, mask_2)
-        
-        assert not torch.all(torch.eq(fake_image_1, fake_image_2)), "Negative samples are the same as positive samples"
-
-        assert mode in ['training', 'validation']
-
-        with torch.no_grad():
-            real_init_features_1 = self.initial_encoder(real_image_1)
-            real_init_features_2 = self.initial_encoder(real_image_2)
-
-        with torch.no_grad() if mode=='validation' else torch.enable_grad():
-            real_features_1 = self.encoder(real_image_1)
-            real_features_2 = self.encoder(real_image_2)
-            fake_features_1 = self.encoder(fake_image_1)
-            fake_features_2 = self.encoder(fake_image_2)
-
-        # MASKING
-        (real_init_features_1_MC, real_features_1_MC, fake_features_1_MC), M = self._mask_features([real_init_features_1, real_features_1, fake_features_1], mask_1)
-        (real_init_features_2_NC, real_features_2_NC, fake_features_2_NC), N = self._mask_features([real_init_features_2, real_features_2, fake_features_2], mask_2)
-        (fake_features_1_OC, fake_features_2_OC), O = self._mask_features([fake_features_1, fake_features_2], mask_combined)
-
-        # MAGNITUDE
-        # Optimize to 1.0
-        magnitude_real_1 = self._magnitude_loss(real_features_1_MC)
-        magnitude_real_2 = self._magnitude_loss(real_features_2_NC)
-        magnitude_real = 0.5 * (magnitude_real_1 + magnitude_real_2)
-
-        magnitude_fake_1 = self._magnitude_loss(fake_features_1_MC)
-        magnitude_fake_2 = self._magnitude_loss(fake_features_2_NC)
-        magnitude_fake = 0.5 * (magnitude_fake_1 + magnitude_fake_2)
-        
-        # Track
-        magnitude_real_1_init = self._magnitude_loss(real_init_features_1_MC)
-        magnitude_real_2_init = self._magnitude_loss(real_init_features_2_NC)
-        magnitude_real_init = 0.5 * (magnitude_real_1_init + magnitude_real_2_init)
-
-        magnitude = 0.5 * (magnitude_real + magnitude_fake)
-
-        # COSINE LOSS
-        # Minimize
-        cosine_real_1_vs_fake_1 = self._cosine_loss(real_features_1_MC, fake_features_1_MC, target_value=1, margin=0.1)
-        cosine_real_2_vs_fake_2 = self._cosine_loss(real_features_2_NC, fake_features_2_NC, target_value=1, margin=0.1)
-        cosine_real_vs_fake = (M * cosine_real_1_vs_fake_1 + N * cosine_real_2_vs_fake_2) / (M + N) # Equal weighting of each valid patch
-
-        # Maximize
-        cosine_fake_1_vs_fake_2 = self._cosine_loss(fake_features_1_OC, fake_features_2_OC, target_value=-1, margin=0.3)
-        
-        # Anchor
-        cosine_real_1_vs_real_1_init = self._cosine_loss(real_features_1_MC, real_init_features_1_MC, target_value=1, margin=0.2)
-        cosine_real_2_vs_real_2_init = self._cosine_loss(real_features_2_NC, real_init_features_2_NC, target_value=1, margin=0.2)
-        cosine_real_vs_real_init = (M * cosine_real_1_vs_real_1_init + N * cosine_real_2_vs_real_2_init) / (M + N)
-        
-        a, b, c = self.options.contrastive_weights
-
-        loss = a * cosine_real_vs_fake + b * cosine_fake_1_vs_fake_2 + c * cosine_real_vs_real_init
-
-        loss += magnitude
-
-        loss_dict = {
-            'R-F_cos': cosine_real_vs_fake.item(),
-            'F1-F2_cos': cosine_fake_1_vs_fake_2.item(),
-            'R-Ri_cos': cosine_real_vs_real_init.item(),
-
-            '|Ri|': magnitude_real_init.item(),
-            '|R|': magnitude_real.item(),
-            '|F|': magnitude_fake.item(),
-
-            'Total': loss.item(),
-        }
-    
-        return loss, loss_dict
     
     def save_model(self, path):
         torch.save(self.encoder.state_dict(), path)
 
-    def _compute_gradient_norm(self):
+    def _compute_gradient_norm(self, printing=False):
         total_norm = 0
-        for p in self.encoder.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
+        for name, param in self.encoder.named_parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
+                if printing: print(f"Gradient norm for {name}: {param_norm:.6f}")
         total_norm = total_norm ** 0.5
+        if printing: print(f"Total gradient norm: {total_norm:.6f}")
         return total_norm
+    
+    def log_weight_changes(self):
+        if not hasattr(self, 'previous_weights'):
+            self.previous_weights = {name: param.data.clone() for name, param in self.encoder.named_parameters()}
+            return
+
+        total_change = 0
+        num_params = 0
+        for name, param in self.encoder.named_parameters():
+            change = torch.abs(param.data - self.previous_weights[name]).mean().item()
+            total_change += change
+            num_params += 1
+            print(f"Average change for {name}: {change:.6f}")
+            self.previous_weights[name] = param.data.clone()
+
+        avg_change = total_change / num_params
+        print(f"Overall average change in weights: {avg_change:.6f}")
+        
+        # Log to TensorBoard
+        self.logger.writer.add_scalar('weight_change/avg', avg_change, self.iteration)
 
 
 if __name__ == "__main__":
 
+    logging.basicConfig(level=logging.INFO)
+
     class Options:
         def __init__(self):
-            self.encoder_path = "ace_encoder_pretrained.pt"
-            self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
-
-            self.dataset_names = ['pantheon', 'brandenburg gate'] #, 'notre dame']
-
-            self.head_paths = {
-                'pantheon': 'output/pantheon.pt',
-                'brandenburg gate': 'output/brandenburg_gate.pt',
-                # 'notre dame': 'output/notre_dame.pt',
-            }
-
-            self.iter_val_limit = 15 # number of samples for each validation
-            self.epoch_val_limit = 60 # for epoch validation
-
-            self.learning_rate = 0.0005
-            self.weight_decay = 0.01
-
-            self.batch_size = 3
-            self.num_epochs = 2
-            self.max_iterations = 5000 / self.batch_size
-            self.gradient_accumulation_samples = 15
-            self.validation_frequency = 5
-
             self.use_half = True
             self.image_height = 480
             self.aug_rotation = 40
@@ -834,39 +774,87 @@ if __name__ == "__main__":
             self.aug_scale_max = 960/480
 
 
-    logging.basicConfig(level=logging.INFO)
+            self.encoder_path = "ace_encoder_pretrained.pt"
+            self.data_path = "/home/johndoe/Documents/data/Transfer Learning/"
+
+
+            self.batch_size = 3
+            self.num_epochs = 2
+            self.max_iterations = 5000 / self.batch_size
+            self.gradient_accumulation_samples = 15
+            self.validation_frequency = 5
+
+            self.iter_val_limit = 15 # number of samples for each validation
+            self.epoch_val_limit = 60 # for epoch validation
+
+
+            self.dataset_names = ['pantheon', 'pantheon test'] #, 'brandenburg gate'] #, 'notre dame']
+
+            self.val_dataset_name = 'pantheon test' # 'brandenburg gate'
+
+            self.head_paths = {
+                'pantheon': 'output/pantheon.pt',
+                'pantheon test': 'output/pantheon.pt',
+                # 'brandenburg gate': 'output/brandenburg_gate.pt',
+                # 'notre dame': 'output/notre_dame.pt',
+            }
+
+
+            self.learning_rate = 0.0005
+            # self.weight_decay = 0.01
+
+
+            self.loss_function = 'combined'
+
+            self.use_coords = 'loss'
+            self.median = False
+            self.coords_scale = 1/50
+
+            self.use_cosine = 'track'
+            # self.cosine_weights = (0.6, 0.4)          # separate: 2
+            # self.cosine_weights = (0.5, 0.3, 0.2)     # combined: 3
+
+            self.use_magnitude = 'track'
 
     options = Options()
 
 
-    # Test
-    options.loss_function = 'separate'
-    options.val_dataset_name = 'pantheon' # 'brandenburg gate'
-    options.contrastive_weights = (0.0, 0.0)
-    # options.experiment_name = "test-3d-mean"
-    # options.output_path = f"output_encoder/{options.experiment_name}"
+    # TESTING
 
-    # print(f'Training {options.experiment_name}')
-    # trainer = TrainerEncoder(options)
-    # val_loss = trainer.train()
+    # for options.learning_rate in [0.003, 0.001, 0.0003,  0.0001, 0.00003]:
+    options.learning_rate = 0.001
+    options.max_iterations = 1000 / options.batch_size
+    options.clip_norm = 1.0
+
+    options.experiment_name = f"enc_clip-{options.clip_norm}_loss-{str(options.loss_function)}_lr{str(options.learning_rate)}"
+    # options.experiment_name = 'test'
+    options.output_path = f"output_encoder/{options.experiment_name}"
+
+    print(f'Training {options.experiment_name}')
+    trainer = TrainerEncoder(options)
+    val_loss = trainer.train()
 
 
-    # Validation
+    # VALIDATION
+
     # for options.magnitude in (False, True):
-    for options.val_dataset_name in options.dataset_names:
+    # for loss_name, options.median in [('mean', False), ('median', True)]:
+    #     for options.val_dataset_name in options.dataset_names:
 
-        options.loss_function = 'separate'
 
-        options.experiment_name = f"3d-median_val-{options.val_dataset_name}"
-        options.output_path = f"output_encoder/{options.experiment_name}"
+    #         options.loss_function = 'separate'
 
-        print(f'Training {options.experiment_name}')
-        trainer = TrainerEncoder(options)
-        val_loss = trainer.train()
+    #         # options.train_dataset_name = [name for name in options.dataset_names if name != options.val_dataset_name][0]
+    #         # options.experiment_name = f"3d-{loss_name}_train-{train_dataset_name}_val-{options.val_dataset_name}"
+    #         options.output_path = f"output_encoder/{options.experiment_name}"
 
-    #     for options.contrastive_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
+    #         print(f'Training {options.experiment_name}')
+    #         trainer = TrainerEncoder(options)
+    #         # val_loss = trainer.train()
 
-    #         w1, w2 = options.contrastive_weights
+    #     for options.cosine_weights in [(1.0, 0.0), (0.8, 0.2), (0.6, 0.4)]:
+
+    #         w1, w2 = options.cosine_weights
     #         options.experiment_name = f"val_separate_w{w1}_{w2}_{options.val_dataset_name}"
     #         options.output_path = f"output_encoder/{options.experiment_name}"
 
@@ -877,9 +865,9 @@ if __name__ == "__main__":
 
     #     options.loss_function = 'combined'
 
-    #     for options.contrastive_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
+    #     for options.cosine_weights in [(0.5, 0.3, 0.2), (0.4, 0.4, 0.2), (0.4, 0.3, 0.3), (0.4, 0.2, 0.4)]:
 
-    #         w1, w2, w3 = options.contrastive_weights
+    #         w1, w2, w3 = options.cosine_weights
     #         options.experiment_name = f"val_combined_w{w1}_{w2}_{w3}_{options.val_dataset_name}"
     #         options.output_path = f"output_encoder/{options.experiment_name}"
 
