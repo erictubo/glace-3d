@@ -755,14 +755,14 @@ if __name__ == "__main__":
     # for options.learning_rate in [0.003, 0.001, 0.0003,  0.0001, 0.00003]:
     options.learning_rate = 0.001
     options.max_iterations = 1000 / options.batch_size
-    options.clip_norm = 1.0
+    options.clip_norm = 3.0
 
     options.experiment_name = f"e2e-fake_clip-{options.clip_norm}_loss-{str(options.loss_function)}_lr-{str(options.learning_rate)}"
     # options.experiment_name = 'test'
     options.output_path = f"output_encoder/{options.experiment_name}"
 
     print(f'Training {options.experiment_name}')
-    trainer = TrainerEncoder(options)
+    trainer = TrainerEncoderE2E(options)
     val_loss = trainer.train()
 
 
