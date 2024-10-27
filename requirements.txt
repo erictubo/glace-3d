@@ -1,5 +1,5 @@
-torch
-torchvision
+torch==2.2.2
+torchvision==0.17.2
 opencv-python
 scikit-image
 scikit-learn
@@ -7,3 +7,6 @@ timm
 matplotlib
 trimesh
 pyrender
+
+tensorboard
+numpy
