@@ -460,9 +460,10 @@ class TrainerACE:
                 self.save_checkpoint()
 
             # switch modes after half iterations
-            if self.iteration == self.options.max_iterations // 2 and self.options.mode == 1:
-                self.options.mode = 0
-                _logger.info(f"Switched from 3D Euclidean distance loss to unsupervised reprojection loss.")
+            if self.options.mode == 1:
+                if self.iteration == self.options.switch_iterations:
+                    self.options.mode = 0
+                    _logger.info(f"Switched from 3D Euclidean distance loss to unsupervised reprojection loss.")
             
             if self.iteration >= self.options.max_iterations:
                 break

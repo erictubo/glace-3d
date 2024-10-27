@@ -30,6 +30,9 @@ if __name__ == '__main__':
     
     parser.add_argument('--mode', type=int,
                         help='0: Unsupervised reprojection loss, 1: Supervised Euclidean loss')
+    
+    parser.add_argument('--switch_iterations', type=int, default=10000,
+                        help='iteration to switch from mode 1 to mode 0')
 
     parser.add_argument('--sparse', type=_strtobool, default=False,
                         help='For mode 1: load sparse init targets when True, generate from depth when False.')
