@@ -1,3 +1,46 @@
+# GLACE 3D
+
+Link to original GLACE repository: https://github.com/cvg/glace
+
+
+## Updates
+
+
+
+### Changes to existing files
+
+| File | Description | Changes |
+| --- | --- | --- |
+| `ace_network.py` | Defines network architecture | Added method to build only head network from state dict (used by encoder transfer learning) |
+| `ace_trainer.py` | Scene-specific training of head with pre-trained encoder | Implemented supervised 3D loss (mode 1) by adding GT scene coordinates to dataloader, option to switch between modes (1 to 0), added saving/loading checkpoints |
+| `ace_dataset.py` | Dataset class to access data during training and testing | Activated scene coordinates; compatibility with numpy depth maps, support for single focal length fx=fy |
+| `train_ace.py` | Training script to run `ace_trainer.py` from command line | Added new options according to changes in `ace_trainer.py`: mode (0, 1), switch_iterations, sparse (for mode 1, MVS model: True, dense mesh: False), checkpoint_path, checkpoint_interval |
+| `test_ace.py` | Testing script to evaluate poses of trained network | Fixed OpenCV issue by switching to Scipy Rotation |
+
+### New files
+
+| File | Description |
+| --- | --- |
+| `test_ace_coords.py` | Testing script to evaluate scene coordinates against available ground truth, rather than poses after PnP/RANSAC as in `test_ace.py` |
+| `encoder_loss.py` | Loss functions for encoder training |
+| `encoder_dataset.py` | Dataset class for encoder and E2E transfer learning |
+| `encoder_trainer.py` | Training of encoder: transfer learning from pre-trained checkpoint |
+| `encoder_trainer_e2e.py` | End-to-end training of encoder and head network |
+| `train_encoder.py` | Training script for encoder |
+
+
+TODO: update `train_encoder.py` to include new options
+
+## 1. Supervised 3D Loss
+...
+
+## 2. Transfer Learning of Encoder (+ Head)
+...
+
+## Datasets
+...
+
+
 # GLACE: Global Local Accelerated Coordinate Encoding
 
 ----------------------------------------------------------------------------------------
