@@ -1,49 +1,280 @@
-# GLACE 3D
+# GLACE-3D: Scene Coordinate Regression using 3D Models
 
-Link to original GLACE repository: https://github.com/cvg/glace
+Based on GLACE (https://github.com/cvg/glace).
 
+**Contents:**
 
-## Updates
+- [GLACE-3D: Scene Coordinate Regression using 3D Models](#glace-3d-scene-coordinate-regression-using-3d-models)
+  - [Installation](#installation)
+  - [Datasets](#datasets)
+  - [Usage](#usage)
+    - [Global Features](#global-features)
+    - [Training](#training)
+    - [Evaluation](#evaluation)
+    - [Transfer Learning](#transfer-learning)
+    - [End-to-End Training](#end-to-end-training)
+  - [Updates Compared to GLACE](#updates-compared-to-glace)
+    - [Changes to Existing Files](#changes-to-existing-files)
+    - [New Files](#new-files)
+  - [Implementation Details](#implementation-details)
+    - [Supervised 3D Loss](#supervised-3d-loss)
+    - [Transfer Learning](#transfer-learning-1)
+- [Original GLACE Documentation](#original-glace-documentation)
+  - [Installation](#installation-1)
+  - [Datasets](#datasets-1)
+    - [{7, 12}-Scenes:](#7-12-scenes)
+    - [Cambridge Landmarks / Aachen Day-Night:](#cambridge-landmarks--aachen-day-night)
+  - [Usage](#usage-1)
+    - [Global feature extraction](#global-feature-extraction)
+    - [GLACE Training](#glace-training)
+    - [GLACE Evaluation](#glace-evaluation)
+    - [Complete training and evaluation scripts](#complete-training-and-evaluation-scripts)
+    - [Pretrained GLACE Networks](#pretrained-glace-networks)
+  - [Publications](#publications)
+  - [License](#license)
 
+[Original GLACE Documentation](#original-glace-documentation) below.
 
+## Installation
 
-### Changes to existing files
+Install dependencies:
+
+```shell
+pip install -r requirements.txt
+```
+
+Install the C++/Python bindings of the DSAC* functions:
+
+```shell
+cd dsacstar
+python setup.py install
+```
+
+## Datasets
+
+...
+
+## Usage
+
+### Global Features
+
+Download pre-trained R2Former checkpoint [CVPR23_DeitS_Rerank.pth](https://drive.google.com/file/d/1RU4wnupKXpmM0FiPeglqeNizBw4w6j38).
+
+Extract global features for all the images in the dataset:
+
+```shell
+cd datasets
+python extract_features.py <scene path> --checkpoint <path to the R2Former checkpoint>
+```
+
+### Training
+
+Train scene-specific regression head using the `train_ace.py` script:
+
+```shell
+
+torchrun --standalone --nnodes <num nodes> --nproc-per-node <num gpus per node> \
+  ./train_ace.py <scene path> <output map name> \
+  --num_head_blocks <num_head_blocks> \
+  --training_buffer_size <training_buffer_size> \
+  --max_iterations <max_iterations> \
+  --checkpoint_path <checkpoint path> \
+  --checkpoint_interval <checkpoint_interval> \
+  --mode <mode> \
+  --sparse <sparse> \
+  --switch_iterations <switch_iterations>
+
+# Example:
+torchrun --standalone --nnodes 1 --nproc-per-node 1 \
+  ./train_ace.py 'datasets/Cambridge_KingsCollege' 'output/Cambridge_KingsCollege.pt' \
+  --num_head_blocks 2 \
+  --training_buffer_size 4000000 \
+  --max_iterations 30000 \
+  --checkpoint_path 'output/checkpoint/Cambridge_KingsCollege.pt' \
+  --checkpoint_interval 5000 \
+  --mode 0 \
+  # --sparse True \
+  # --switch_iterations 10000
+
+```
+
+Relevant options from GLACE:
+
+* `--num_head_blocks` specifies the size of the regression head: use 2 for medium-sized datasets (GLACE uses N=1 for 7Scenes and 12Scenes, N=2 for Cambridge Landmarks, and N=3 + other settings for Aachen - see paper).
+* `--training_buffer_size` changes the size of the training buffer to fit on GPU memory (default 16M, used 4M to fit on 8GB GPU).
+* `--max_iterations` changes the number of training iterations (default 30K).
+
+New options (not in GLACE):
+
+- Checkpoints:
+  - `--checkpoint_path` specifies the path where to save checkpoints during training to avoid data loss and resume training later.
+  - `--checkpoint_interval` specifies the iterations interval at which to save checkpoints (default 5K).
+- Loss function:
+  - `--mode` changes the loss function (0 for reprojection loss, 1 for supervised 3D loss).
+  - `--sparse` only for mode 1: set True for MVS model, False for dense mesh - will either use sparse MVS initialization targets or dense depth maps.
+  - `--switch_iterations` only for mode 1: after how many iterations to switch from mode 1 (supervised 3D loss) to mode 0 (reprojection loss).
+
+Run `train_ace.py --help` for more details or see the `train_ace.py` script for options and defaults.
+
+> **Note:** Automatic training and testing scripts are available in the `/scripts` folder, making it easier to run experiments with different datasets and/or settings.
+
+Tasks:
+
+- [ ] Generate checkpoint_path automatically in [train_ace.py](train_ace.py) / [ace_trainer.py](ace_trainer.py) so that option becomes optional
+
+### Evaluation
+
+Test localization using the `test_ace.py` script:
+
+```shell
+./test_ace.py <scene path> <output map name> \
+  --test_log_file <test log file> \
+  --pose_log_file <pose log file> \
+
+# Example:
+./test_ace.py 'datasets/Cambridge_KingsCollege' 'output/Cambridge_KingsCollege.pt' \
+  --test_log_file 'eval/test_log_Cambridge_KingsCollege.txt' \
+  --pose_log_file 'eval/pose_log_Cambridge_KingsCollege.txt'
+```
+
+- `test_log_file` saves the test results (accuracy metrics).
+- `pose_log_file` saves the estimated poses.
+
+Alternatively, use the `test_ace_coords.py` script to evaluate scene coordinates against available ground truth (instead of poses after PnP/RANSAC):
+
+```shell
+./test_ace_coords.py <scene path> <output map name> \
+  --test_log_file <test log file> \
+  --dist_log_file <pose log file> \
+```
+
+> **Note:** Automatic training and testing scripts are available in the `/scripts` folder, making it easier to run experiments with different datasets and/or settings.
+
+Tasks:
+
+- [ ] Update [test_ace.py](test_ace.py) to include new log path options + mkdir for log files
+- [ ] Update [test_ace_coords.py](test_ace_coords.py) to include --dist_log_file --test_log_file options instead of saving to scene path
+
+### Transfer Learning
+
+For now, set options directly in the [encoder_trainer.py](encoder_trainer.py) code.
+
+... training script to run from command line to follow.
+
+Options:
+
+- **Data \& augmentation:**
+  - `use_half`: default `True`
+  - `image_height`: default `480`
+  - `aug_rotation`: default `40` [deg]
+  - `aug_scale_min`: default `240/480`
+  - `aug_scale_max`: default `960/480`
+
+- **Input:**
+  - `encoder_path`: path to pre-trained encoder
+  - `data_path`: specifies the path to the dataset.
+  - `dataset_names`: list of dataset names = folders in data_path
+  - `val_dataset_name`: validation dataset name, in dataset_names
+  - `head_paths`: dictionary of scene-specific head paths = {dataset_name: head_path, ...}
+
+- **Output:**
+  - `experiment_name`: name of the experiment for Tensorboard logging
+  - `output_path`: path to save encoder
+
+- **Training parameters:**
+  - `batch_size`
+  - `num_epochs`
+  - `max_iterations`
+  - `gradient_accumulation_samples`: samples to accumulate before update
+  - `validation_frequency`: number of updates before regular validation
+  - `iter_val_limit`: sample limit for regular validation (during epoch)
+  - `epoch_val_limit`: sample limit for epoch validation
+  - `learning_rate`
+  - `clip_norm`: gradient clipping value
+
+- **Loss functions:**
+  - `loss_function`: `separate` / `combined` - fine-tune encoder for synthetic data only and use pre-trained encoder for real data / fine-tune encoder for both synthetic and real data
+  - Scene coordinates
+    - `use_coords`: `loss`/ `track`
+    - `median`: `True` / `False`
+    - `coords_scale`: scale factor for scene coordinates in loss
+  - Features
+    - `use_cosine`: `loss` / `track`
+    - `cosine_weights`: weights for cosine loss
+      - Separate: 2 weights [similarity, difference]
+      - Combined: 3 weights [similarity, difference, anchor]
+    - `use_magnitude`: `loss` / `track`
+
+See [encoder_trainer.py](encoder_trainer.py) for more details (scroll to the bottom).
+
+Tasks:
+
+- [ ] Update [train_encoder.py](train_encoder.py) to include new options of [encoder_trainer.py](encoder_trainer.py)
+
+### End-to-End Training
+
+For now, set options directly in the [encoder_trainer_e2e.py](encoder_trainer_e2e.py) code.
+
+... training script to run from command line to follow.
+
+Options similar to above, only differences:
+
+- Currently, only one dataset (head) is supported: `head_path` instead of `head_paths` dictionary
+- Most loss function options are irrelevant since training against 3D coordinates exclusively, only:
+  - `loss_function`: `separate` / `combined` - fine-tune encoder for synthetic data only and use pre-trained 
+  - `median`: `True` / `False`
+  - (features cosine loss and magnitude commented out but can be activated for tracking purposes)
+
+See [encoder_trainer_e2e.py](encoder_trainer_e2e.py) for more details (scroll to the bottom).
+
+Tasks:
+
+- [ ] Create training script to work with [encoder_trainer_e2e.py](encoder_trainer_e2e.py)
+- [ ] Update [encoder_trainer_e2e.py](encoder_trainer_e2e.py) for multiple datasets
+
+## Updates Compared to GLACE
+
+### Changes to Existing Files
 
 | File | Description | Changes |
 | --- | --- | --- |
-| `ace_network.py` | Defines network architecture | Added method to build only head network from state dict (used by encoder transfer learning) |
-| `ace_trainer.py` | Scene-specific training of head with pre-trained encoder | Implemented supervised 3D loss (mode 1) by adding GT scene coordinates to dataloader, option to switch between modes (1 to 0), added saving/loading checkpoints |
-| `ace_dataset.py` | Dataset class to access data during training and testing | Activated scene coordinates; compatibility with numpy depth maps, support for single focal length fx=fy |
-| `train_ace.py` | Training script to run `ace_trainer.py` from command line | Added new options according to changes in `ace_trainer.py`: mode (0, 1), switch_iterations, sparse (for mode 1, MVS model: True, dense mesh: False), checkpoint_path, checkpoint_interval |
-| `test_ace.py` | Testing script to evaluate poses of trained network | Fixed OpenCV issue by switching to Scipy Rotation |
+| [ace_network.py](ace_network.py) | Defines network architecture | Added method to build only head network from state dict (used by encoder transfer learning) |
+| [ace_trainer.py](ace_trainer.py) | Scene-specific training of head with pre-trained encoder | Implemented supervised 3D loss (mode 1) by adding GT scene coordinates to dataloader, option to switch between modes (1 to 0), added saving/loading checkpoints |
+| [ace_dataset.py](ace_dataset.py) | Dataset class to access data during training and testing | Activated scene coordinates; compatibility with numpy depth maps, support for single focal length fx=fy |
+| [train_ace.py](train_ace.py) | Training script to run [ace_trainer.py](ace_trainer.py) from command line | Added new options according to changes in [ace_trainer.py](ace_trainer.py): mode (0, 1), switch_iterations, sparse (for mode 1, MVS model: True, dense mesh: False), checkpoint_path, checkpoint_interval |
+| [test_ace.py](test_ace.py) | Testing script to evaluate poses of trained network | Added logging paths as input arguments, fixed OpenCV issue by switching to Scipy Rotation |
 
-### New files
+### New Files
 
 | File | Description |
 | --- | --- |
-| `test_ace_coords.py` | Testing script to evaluate scene coordinates against available ground truth, rather than poses after PnP/RANSAC as in `test_ace.py` |
-| `encoder_loss.py` | Loss functions for encoder training |
-| `encoder_dataset.py` | Dataset class for encoder and E2E transfer learning |
-| `encoder_trainer.py` | Training of encoder: transfer learning from pre-trained checkpoint |
-| `encoder_trainer_e2e.py` | End-to-end training of encoder and head network |
-| `train_encoder.py` | Training script for encoder |
+| [test_ace_coords.py](test_ace_coords.py) | Testing script to evaluate scene coordinates against available ground truth, rather than poses after PnP/RANSAC as in [test_ace.py](test_ace.py) |
+| [encoder_loss.py](encoder_loss.py) | Loss functions for encoder training |
+| [encoder_dataset.py](encoder_dataset.py) | Dataset class for encoder and E2E transfer learning |
+| [encoder_trainer.py](encoder_trainer.py) | Training of encoder: transfer learning from pre-trained checkpoint |
+| [encoder_trainer_e2e.py](encoder_trainer_e2e.py) | End-to-end training of encoder and head network |
+| [train_encoder.py](train_encoder.py) | Training script for encoder |
 
+## Implementation Details
 
-TODO: update `train_encoder.py` to include new options
+### Supervised 3D Loss
 
-## 1. Supervised 3D Loss
 ...
 
-## 2. Transfer Learning of Encoder (+ Head)
+### Transfer Learning
+
 ...
 
-## Datasets
-...
 
 
-# GLACE: Global Local Accelerated Coordinate Encoding
 
-----------------------------------------------------------------------------------------
+
+
+
+
+
+# Original GLACE Documentation
+
 
 This repository contains the code associated to the GLACE paper:
 > **GLACE: Global Local Accelerated Coordinate Encoding**
