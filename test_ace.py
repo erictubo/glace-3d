@@ -53,9 +53,15 @@ if __name__ == '__main__':
     parser.add_argument('--encoder_path', type=Path, default=Path(__file__).parent / "ace_encoder_pretrained.pt",
                         help='file containing pre-trained encoder weights')
 
-    parser.add_argument('--session', '-sid', default='',
-                        help='custom session name appended to output files, '
-                             'useful to separate different runs of a script')
+    parser.add_argument('--test_log_file', type=Path,
+                        help='file to save test statistics to')
+    
+    parser.add_argument('--pose_log_file', type=Path, 
+                        help='file to save per-frame poses and errors to')
+
+    # parser.add_argument('--session', '-sid', default='',
+    #                     help='custom session name appended to output files, '
+    #                          'useful to separate different runs of a script')
 
     parser.add_argument('--image_resolution', type=int, default=480, help='base image resolution')
 
@@ -110,7 +116,7 @@ if __name__ == '__main__':
     scene_path = Path(opt.scene)
     head_network_path = Path(opt.network)
     encoder_path = Path(opt.encoder_path)
-    session = opt.session
+    # session = opt.session
 
     # Setup dataset.
     if scene_path.suffix == '.txt':
@@ -142,19 +148,26 @@ if __name__ == '__main__':
     network = network.to(device)
     network.eval()
 
-    # Save the outputs in the same folder as the network being evaluated.
-    output_dir = head_network_path.parent
-    scene_name = scene_path.name
-    # This will contain aggregate scene stats (median translation/rotation errors, and avg processing time per frame).
-    test_log_file = output_dir / f'test_{scene_name}_{opt.session}.txt'
-    _logger.info(f"Saving test aggregate statistics to: {test_log_file}")
-    # This will contain each frame's pose (stored as quaternion + translation) and errors.
-    pose_log_file = output_dir / f'poses_{scene_name}_{opt.session}.txt'
-    _logger.info(f"Saving per-frame poses and errors to: {pose_log_file}")
+    # # Save the outputs in the same folder as the network being evaluated.
+    # output_dir = head_network_path.parent
+    # scene_name = scene_path.name
+    # # This will contain aggregate scene stats (median translation/rotation errors, and avg processing time per frame).
+    # test_log_file = output_dir / f'test_{scene_name}_{opt.session}.txt'
+    # # This will contain each frame's pose (stored as quaternion + translation) and errors.
+    # pose_log_file = output_dir / f'poses_{scene_name}_{opt.session}.txt'
+
+    # add .txt to files if not present
+    if not opt.test_log_file.suffix == '.txt':
+        opt.test_log_file += '.txt'
+    if not opt.pose_log_file.suffix == '.txt':
+        opt.pose_log_file += '.txt'
+
+    _logger.info(f"Saving test aggregate statistics to: {opt.test_log_file}")
+    _logger.info(f"Saving per-frame poses and errors to: {opt.pose_log_file}")
 
     # Setup output files.
-    test_log = open(test_log_file, 'w', 1)
-    pose_log = open(pose_log_file, 'w', 1)
+    test_log = open(opt.test_log_file, 'w', 1)
+    pose_log = open(opt.pose_log_file, 'w', 1)
 
     # Metrics of interest.
     avg_batch_time = 0
