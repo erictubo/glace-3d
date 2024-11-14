@@ -4,34 +4,22 @@ Based on GLACE (https://github.com/cvg/glace).
 
 **Contents:**
 
-- [GLACE-3D: Scene Coordinate Regression using 3D Models](#glace-3d-scene-coordinate-regression-using-3d-models)
-  - [Installation](#installation)
-  - [Datasets](#datasets)
-  - [Usage](#usage)
+1. [Installation](#installation)
+2. [Datasets](#datasets)
+3. [Usage](#usage)
     - [Global Features](#global-features)
     - [Training](#training)
     - [Evaluation](#evaluation)
     - [Transfer Learning](#transfer-learning)
     - [End-to-End Training](#end-to-end-training)
-  - [Updates Compared to GLACE](#updates-compared-to-glace)
+
+4. [Updates Compared to GLACE](#updates-compared-to-glace)
     - [Changes to Existing Files](#changes-to-existing-files)
     - [New Files](#new-files)
-  - [Implementation Details](#implementation-details)
+
+5. [Implementation Details](#implementation-details)
     - [Supervised 3D Loss](#supervised-3d-loss)
     - [Transfer Learning](#transfer-learning-1)
-- [Original GLACE Documentation](#original-glace-documentation)
-  - [Installation](#installation-1)
-  - [Datasets](#datasets-1)
-    - [{7, 12}-Scenes:](#7-12-scenes)
-    - [Cambridge Landmarks / Aachen Day-Night:](#cambridge-landmarks--aachen-day-night)
-  - [Usage](#usage-1)
-    - [Global feature extraction](#global-feature-extraction)
-    - [GLACE Training](#glace-training)
-    - [GLACE Evaluation](#glace-evaluation)
-    - [Complete training and evaluation scripts](#complete-training-and-evaluation-scripts)
-    - [Pretrained GLACE Networks](#pretrained-glace-networks)
-  - [Publications](#publications)
-  - [License](#license)
 
 [Original GLACE Documentation](#original-glace-documentation) below.
 
@@ -106,21 +94,17 @@ Relevant options from GLACE:
 
 New options (not in GLACE):
 
-- Checkpoints:
-  - `--checkpoint_path` specifies the path where to save checkpoints during training to avoid data loss and resume training later.
-  - `--checkpoint_interval` specifies the iterations interval at which to save checkpoints (default 5K).
 - Loss function:
   - `--mode` changes the loss function (0 for reprojection loss, 1 for supervised 3D loss).
-  - `--sparse` only for mode 1: set True for MVS model, False for dense mesh - will either use sparse MVS initialization targets or dense depth maps.
   - `--switch_iterations` only for mode 1: after how many iterations to switch from mode 1 (supervised 3D loss) to mode 0 (reprojection loss).
+  - `--sparse` only for mode 1: set True for MVS model, False for dense mesh - will either use sparse MVS initialization targets or dense depth maps.
+- Checkpoints:
+  - `--checkpoint_interval` specifies the iterations interval at which to save checkpoints (default 5K).
+  - `--checkpoint_path` specifies the path where to save checkpoints during training to avoid data loss and resume training later.
 
 Run `train_ace.py --help` for more details or see the `train_ace.py` script for options and defaults.
 
 > **Note:** Automatic training and testing scripts are available in the `/scripts` folder, making it easier to run experiments with different datasets and/or settings.
-
-Tasks:
-
-- [ ] Generate checkpoint_path automatically in [train_ace.py](train_ace.py) / [ace_trainer.py](ace_trainer.py) so that option becomes optional
 
 ### Evaluation
 
@@ -129,7 +113,7 @@ Test localization using the `test_ace.py` script:
 ```shell
 ./test_ace.py <scene path> <output map name> \
   --test_log_file <test log file> \
-  --pose_log_file <pose log file> \
+  --pose_log_file <pose log file>
 
 # Example:
 ./test_ace.py 'datasets/Cambridge_KingsCollege' 'output/Cambridge_KingsCollege.pt' \
@@ -144,22 +128,14 @@ Alternatively, use the `test_ace_coords.py` script to evaluate scene coordinates
 
 ```shell
 ./test_ace_coords.py <scene path> <output map name> \
-  --test_log_file <test log file> \
-  --dist_log_file <pose log file> \
+  --eval_path <evaluation path>
 ```
 
 > **Note:** Automatic training and testing scripts are available in the `/scripts` folder, making it easier to run experiments with different datasets and/or settings.
 
-Tasks:
-
-- [ ] Update [test_ace.py](test_ace.py) to include new log path options + mkdir for log files
-- [ ] Update [test_ace_coords.py](test_ace_coords.py) to include --dist_log_file --test_log_file options instead of saving to scene path
-
 ### Transfer Learning
 
-For now, set options directly in the [encoder_trainer.py](encoder_trainer.py) code.
-
-... training script to run from command line to follow.
+Set options directly in the [encoder_trainer.py](encoder_trainer.py) code, at the bottom in the `if __name__ == '__main__':` block.
 
 Options:
 
@@ -206,10 +182,6 @@ Options:
     - `use_magnitude`: `loss` / `track`
 
 See [encoder_trainer.py](encoder_trainer.py) for more details (scroll to the bottom).
-
-Tasks:
-
-- [ ] Update [train_encoder.py](train_encoder.py) to include new options of [encoder_trainer.py](encoder_trainer.py)
 
 ### End-to-End Training
 
@@ -265,14 +237,6 @@ Tasks:
 
 ...
 
-
-
-
-
-
-
-
-
 # Original GLACE Documentation
 
 
@@ -287,8 +251,6 @@ For further information please visit:
 
 - [Project page](https://xjiangan.github.io/glace)
 - [Arxiv](https://arxiv.org/abs/2406.04340)
-
-
 
 ## Installation
 
@@ -373,7 +335,6 @@ cd datasets
 Note: The Aachen Day-Night dataset has no public test ground truth. The dataset script will create dummy ground truth in the form of identity camera poses. The actual pose evaluation has to be performed via the dataset website [Visual Localization Benchmark](https://www.visuallocalization.net/).
 
 ## Usage
-
 
 ### Global feature extraction
 
