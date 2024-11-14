@@ -199,10 +199,13 @@ if __name__ == '__main__':
     
     parser.add_argument('--encoder_path', type=Path, default=Path(__file__).parent / "ace_encoder_pretrained.pt",
                         help='file containing pre-trained encoder weights')
+    
+    parser.add_argument('--eval_path', type=Path,
+                        help='path to save the evaluation results')
 
-    parser.add_argument('--session', '-sid', default='',
-                        help='custom session name appended to output files, '
-                             'useful to separate different runs of a script')
+    # parser.add_argument('--session', '-sid', default='',
+    #                     help='custom session name appended to output files, '
+    #                          'useful to separate different runs of a script')
 
     parser.add_argument('--image_resolution', type=int, default=480, help='base image resolution')
 
@@ -257,7 +260,7 @@ if __name__ == '__main__':
     scene_path = Path(opt.scene)
     head_network_path = Path(opt.network)
     encoder_path = Path(opt.encoder_path)
-    session = opt.session
+    # session = opt.session
 
     # SAME UNTIL HERE AS train_ace.py
 
@@ -287,16 +290,16 @@ if __name__ == '__main__':
     network.eval()
 
     # Save the outputs in the same folder as the network being evaluated.
-    output_dir = head_network_path.parent
-    scene_name = scene_path.name
+    # output_dir = head_network_path.parent
+    # scene_name = scene_path.name
 
-    network_name = head_network_path.stem
-    encoder_name = encoder_path.stem
-    eval_path = scene_path / "test" / (network_name + "-" + encoder_name)
+    # network_name = head_network_path.stem
+    # encoder_name = encoder_path.stem
+    # eval_path = scene_path / "test" / (network_name + "-" + encoder_name)
 
     # # Setup output files.
-    dist_log_file = eval_path / f'avg_distances.txt'
-    test_log_file = eval_path / f'mean_avg_dist.txt'
+    dist_log_file = opt.eval_path / f'avg_distances.txt'
+    test_log_file = opt.eval_path / f'mean_avg_dist.txt'
     dist_log = open(dist_log_file, 'w', 1)
     test_log = open(test_log_file, 'w', 1)
 
@@ -310,10 +313,10 @@ if __name__ == '__main__':
     id = 0
     total = len(testset)
 
-    if not eval_path.exists(): eval_path.mkdir()
+    if not opt.eval_path.exists(): opt.eval_path.mkdir()
 
     for dir in ['init_viz', 'init_pred', 'init_viz_pred', 'init_viz_diff']:
-        path = eval_path / dir
+        path = opt.eval_path / dir
         if not path.exists(): path.mkdir()
 
     # Testing loop.
@@ -349,18 +352,18 @@ if __name__ == '__main__':
                 frame_name = Path(frame_path).name.split('.')[0]
 
                 # Save predicted scene coordinates
-                torch.save(scene_coordinates_3HW, eval_path / "init_pred" / f"{frame_name}.dat")
+                torch.save(scene_coordinates_3HW, opt.eval_path / "init_pred" / f"{frame_name}.dat")
 
                 # Visualize scene coordinates
                 visualize_scene_coordinate_map(
                     gt_scene_coords_3HW,
                     frame_name,
-                    eval_path / "init_viz",
+                    opt.eval_path / "init_viz",
                 )
                 visualize_scene_coordinate_map(
                     scene_coordinates_3HW,
                     frame_name,
-                    eval_path / "init_viz_pred",
+                    opt.eval_path / "init_viz_pred",
                 )
 
                 # Compare scene coordinates with GT scene coordinates
@@ -368,7 +371,7 @@ if __name__ == '__main__':
                     gt_scene_coords_3HW,
                     scene_coordinates_3HW,
                     frame_name,
-                    eval_path / "init_viz_diff",
+                    opt.eval_path / "init_viz_diff",
                 )
 
                 avg_dist = round(avg_dist, 2)
@@ -388,9 +391,6 @@ if __name__ == '__main__':
     
     assert id == total
 
-    # TODO: save average distances to file as frame: dist
-    # TODO: save median at start of file
-
     avg_distances.sort()
     median_idx = total // 2
     median_avg_distance = avg_distances[median_idx]
@@ -401,8 +401,3 @@ if __name__ == '__main__':
 
     test_log.close()
     dist_log.close()
-
-
-# 1. Save predictions
-# 2. Compare predictions to GT
-# 3. Compare fake predictions to real predictions / real GT
