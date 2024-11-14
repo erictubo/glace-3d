@@ -187,6 +187,15 @@ class TrainerACE:
         Fills a feature buffer using the pretrained encoder and subsequently trains a scene coordinate regression head.
         """
 
+        # Set default checkpoint path
+        if self.options.checkpoint_path is None:
+            self.options.checkpoint_path = self.options.output_map_file.parent / "checkpoint" / self.options.output_map_file.name
+
+        # Create checkpoint directory if it doesn't exist.
+        if not os.path.exists(self.options.checkpoint_path.parent):
+            # only make directory without parents
+            os.mkdir(self.options.checkpoint_path.parent)
+
         # Load checkpoint if it exists
         if os.path.exists(self.options.checkpoint_path):
             self.load_checkpoint()

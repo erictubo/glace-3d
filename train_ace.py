@@ -37,11 +37,11 @@ if __name__ == '__main__':
     parser.add_argument('--sparse', type=_strtobool, default=False,
                         help='For mode 1: load sparse init targets when True, generate from depth when False.')
     
-    parser.add_argument('--checkpoint_path', type=Path,
-                        help='target file to save checkpoints')
-    
     parser.add_argument('--checkpoint_interval', type=int, default=5000,
                         help='interval to save checkpoints')
+    
+    parser.add_argument('--checkpoint_path', type=Path, default=None,
+                        help='target file to save checkpoints, default: output_path/checkpoint/output_name')
     
     parser.add_argument('--global_feat', type=_strtobool, default=True,
                         help='Use global feature.')
