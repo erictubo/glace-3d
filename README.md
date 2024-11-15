@@ -1,6 +1,6 @@
 # GLACE-3D: Scene Coordinate Regression using 3D Models
 
-Based on GLACE (https://github.com/cvg/glace).
+This repository adapts Scene Coordinate Regression (specifically [GLACE](https://github.com/cvg/glace)) for localization against 3D models, where the training data is generated using [3D-Localization](https://github.com/erictubo/3d-localization). It implements a supervised 3D loss function to make effective use of the available 3D scene coordinates and transfer learning to bridge the domain gap between synthetic and real data.
 
 **Contents:**
 
@@ -19,7 +19,7 @@ Based on GLACE (https://github.com/cvg/glace).
 
 5. [Implementation Details](#implementation-details)
     - [Supervised 3D Loss](#supervised-3d-loss)
-    - [Transfer Learning](#transfer-learning-1)
+    - [Transfer Learning](#transfer-learning)
 
 [Original GLACE Documentation](#original-glace-documentation) below.
 
