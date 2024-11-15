@@ -1,4 +1,5 @@
 # Copyright © Niantic, Inc. 2022.
+# Contribution: Adapted from GLACE - added method to build only head network from state dict
 
 import logging
 import math

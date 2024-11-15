@@ -1,11 +1,38 @@
+#!/usr/bin/env python3
+# Contribution: New addition in GLACE-3D - loss functions
+
+"""
+Loss functions for encoder training and transfer learning.
+
+This module provides loss functions for training the encoder network
+in both transfer learning and end-to-end scenarios.
+"""
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Optional
+
+from ace_loss import coords_to_colors
 
 
 def magnitude_loss(features, target_value=1.0, margin=0.15):
-
+    """
+    Compute magnitude loss to regularize feature magnitudes.
+    
+    This loss encourages features to have a target magnitude within a specified margin.
+    It helps maintain consistent feature scales across different domains.
+    
+    Args:
+        features (torch.Tensor): Feature tensor of shape (batch_size, feature_dim)
+        target_value (float): Target magnitude value. Default is 1.0
+        margin (float): Acceptable margin around target value. Default is 0.15
+    
+    Returns:
+        torch.Tensor: Magnitude loss value
+    """
     magnitude = torch.mean(torch.norm(features, p=2, dim=1))
 
     return F.relu(torch.abs(target_value - magnitude) - margin)
@@ -16,17 +43,45 @@ def magnitude_loss(features, target_value=1.0, margin=0.15):
     # return losses.mean()
 
 
-def cosine_loss( features_1, features_2, target_value=1, margin=0.1):
-
+def cosine_loss(features_1, features_2, target_value=1, margin=0.1):
+    """
+    Compute cosine similarity loss between two feature sets.
+    
+    This loss encourages features from different sources (e.g., real vs synthetic)
+    to have a target cosine similarity within a specified margin.
+    
+    Args:
+        features_1 (torch.Tensor): First feature set of shape (batch_size, feature_dim)
+        features_2 (torch.Tensor): Second feature set of shape (batch_size, feature_dim)
+        target_value (float): Target cosine similarity. Default is 1.0 (perfect similarity)
+        margin (float): Acceptable margin around target value. Default is 0.1
+    
+    Returns:
+        torch.Tensor: Cosine similarity loss value
+    """
     cos_sim = F.cosine_similarity(features_1, features_2, dim=1)
 
     losses = F.relu(torch.abs(target_value - cos_sim) - margin)
-
     return losses.mean()
 
 
 def mse_loss(features_1, features_2, target_value=0.0, margin=0.0, p=1):
-
+    """
+    Compute MSE loss between normalized feature sets.
+    
+    This loss computes the mean squared error between two normalized feature sets,
+    encouraging them to be similar within a specified margin.
+    
+    Args:
+        features_1 (torch.Tensor): First feature set
+        features_2 (torch.Tensor): Second feature set
+        target_value (float): Target MSE value. Default is 0.0
+        margin (float): Acceptable margin around target value. Default is 0.0
+        p (int): Norm order for normalization. Default is 1 (L1 norm)
+    
+    Returns:
+        torch.Tensor: MSE loss value
+    """
     features_1 = F.normalize(features_1, p=p, dim=1)
     features_2 = F.normalize(features_2, p=p, dim=1)
 
@@ -38,7 +93,23 @@ def mse_loss(features_1, features_2, target_value=0.0, margin=0.0, p=1):
 
 
 def mae_loss(features_1, features_2, target_value=0.0, margin=0.0, smooth=True, p=1):
-
+    """
+    Compute MAE loss between normalized feature sets.
+    
+    This loss computes the mean absolute error between two normalized feature sets,
+    with optional smoothing for better gradient flow.
+    
+    Args:
+        features_1 (torch.Tensor): First feature set
+        features_2 (torch.Tensor): Second feature set
+        target_value (float): Target MAE value. Default is 0.0
+        margin (float): Acceptable margin around target value. Default is 0.0
+        smooth (bool): Whether to use smooth L1 loss. Default is True
+        p (int): Norm order for normalization. Default is 1 (L1 norm)
+    
+    Returns:
+        torch.Tensor: MAE loss value
+    """
     features_1 = F.normalize(features_1, p=p, dim=1)
     features_2 = F.normalize(features_2, p=p, dim=1)
 
@@ -53,6 +124,19 @@ def mae_loss(features_1, features_2, target_value=0.0, margin=0.0, smooth=True, 
 
 
 def diversity_loss(features, feature_mask):
+    """
+    Compute diversity loss to encourage feature diversity.
+    
+    This loss encourages features to be diverse by penalizing high similarity
+    between different feature channels. It helps prevent feature collapse.
+    
+    Args:
+        features (torch.Tensor): Feature tensor of shape (batch_size, channels, height, width)
+        feature_mask (torch.Tensor): Binary mask of shape (batch_size, 1, height, width)
+    
+    Returns:
+        torch.Tensor: Diversity loss value
+    """
     B, C, H, W = features.shape
     
     # Reshape features
@@ -78,7 +162,19 @@ def diversity_loss(features, feature_mask):
 
 
 def spatial_consistency_loss(features, feature_mask):
-
+    """
+    Compute spatial consistency loss to encourage smooth feature transitions.
+    
+    This loss encourages features to vary smoothly across spatial dimensions,
+    which helps maintain spatial coherence in the learned representations.
+    
+    Args:
+        features (torch.Tensor): Feature tensor of shape (batch_size, channels, height, width)
+        feature_mask (torch.Tensor): Binary mask of shape (batch_size, 1, height, width)
+    
+    Returns:
+        torch.Tensor: Spatial consistency loss value
+    """
     assert len(features.shape) == 4, features.shape
     B, C, H, W = features.shape
 
@@ -104,7 +200,21 @@ def spatial_consistency_loss(features, feature_mask):
 
 
 def triplet_loss(anchor, positive, negative, margin=0.2):
-
+    """
+    Compute triplet loss for feature learning.
+    
+    This loss encourages features to be closer to positive examples and farther
+    from negative examples by a specified margin.
+    
+    Args:
+        anchor (torch.Tensor): Anchor features
+        positive (torch.Tensor): Positive example features
+        negative (torch.Tensor): Negative example features
+        margin (float): Margin between positive and negative distances. Default is 0.2
+    
+    Returns:
+        torch.Tensor: Triplet loss value
+    """
     distance_positive = F.pairwise_distance(anchor, positive, p=2)
     distance_negative = F.pairwise_distance(anchor, negative, p=2) # positive, negative
 
@@ -116,6 +226,22 @@ def triplet_loss(anchor, positive, negative, margin=0.2):
 def coords_loss(gt_coords, pred_coords, median=False, visualize=False):
     """
     Compute the loss between predicted and ground truth coordinates.
+    
+    This loss measures the Euclidean distance between predicted and ground truth
+    3D scene coordinates. It can optionally use median instead of mean and
+    provides visualization capabilities for debugging.
+    
+    Args:
+        gt_coords (torch.Tensor): Ground truth coordinates of shape (batch_size, 3, height, width)
+        pred_coords (torch.Tensor): Predicted coordinates of shape (batch_size, 3, height, width)
+        median (bool): Whether to use median instead of mean. Default is False
+        visualize (bool): Whether to visualize the differences. Default is False
+    
+    Returns:
+        tuple: (loss_value, num_valid_coordinates)
+    
+    Note:
+        Only valid coordinates (non-zero ground truth) are considered in the loss.
     """
     assert pred_coords.shape == gt_coords.shape, f"{pred_coords.shape} != {gt_coords.shape}"
 
@@ -153,9 +279,21 @@ def coords_loss(gt_coords, pred_coords, median=False, visualize=False):
 
 def mask_features(features_list, feature_mask):
     """
-    Mask features to valid values only, reshaping to 2D tensor.\\
-    Input: features_list (shape BxCxHxW each), feature_mask (shape Bx1xHxW)\\
-    Output: valid_features_list (shape MxC each, where M is the number of valid patches, M <= N = B*H*W)
+    Mask features to valid values only, reshaping to 2D tensor.
+    
+    This function applies a binary mask to a list of feature tensors and reshapes
+    them to 2D tensors containing only valid (masked) features.
+    
+    Args:
+        features_list (list): List of feature tensors, each of shape (batch_size, channels, height, width)
+        feature_mask (torch.Tensor): Binary mask of shape (batch_size, 1, height, width)
+    
+    Returns:
+        list: List of masked feature tensors, each of shape (num_valid, channels)
+    
+    Note:
+        All feature tensors must have the same shape. The output contains only
+        features where the mask is True.
     """
 
     B, C, H, W = features_list[0].shape
@@ -178,6 +316,7 @@ def mask_features(features_list, feature_mask):
     features_NC_list = [normalize_shape(features) for features in features_list]
 
     def apply_mask(features_NC, mask_NC):
+        """Apply mask to features and return valid features only"""
         valid_features = features_NC[mask_NC]
 
         N, C = features_NC.shape
@@ -204,6 +343,18 @@ def mask_features(features_list, feature_mask):
 
 
 def coords_to_colors(coords):
+    """
+    Convert 3D coordinates to RGB colors for visualization.
+    
+    This function maps 3D coordinate values to RGB colors for visualization
+    purposes. It normalizes the coordinates and maps them to the RGB color space.
+    
+    Args:
+        coords (torch.Tensor): 3D coordinates of shape (3, height, width)
+    
+    Returns:
+        numpy.ndarray: RGB image of shape (height, width, 3)
+    """
     # 1. Convert coords to numpy array
     coords = coords.permute(1, 2, 0).numpy()
 

@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# Contribution: New addition in GLACE-3D - end-to-end trainer
+
+"""
+End-to-end trainer for encoder and head network.
+
+This module provides training functionality for end-to-end training of both
+the encoder and scene-specific head network together.
+"""
+
 import logging
 import random
 import time

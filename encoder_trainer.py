@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# Contribution: New addition in GLACE-3D - encoder trainer
+
+"""
+Trainer for encoder transfer learning.
+
+This module provides training functionality for fine-tuning the encoder network
+using transfer learning from a pre-trained checkpoint.
+"""
+
 import logging
 import random
 import time

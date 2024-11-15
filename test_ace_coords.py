@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Copyright © Niantic, Inc. 2022.
+# Contribution: New addition in GLACE-3D - coordinate evaluation script
+
+"""
+Test script to evaluate scene coordinates against ground truth.
+
+This script evaluates predicted scene coordinates directly against available
+ground truth, rather than computing poses through PnP/RANSAC as in test_ace.py.
+
+This is an addition to the original GLACE codebase for coordinate-level evaluation.
+
+Adapted from:
+- ACE (Niantic, Inc.) - Original scene coordinate regression framework
+- GLACE (Wang et al., CVPR 2024) - Global Local Accelerated Coordinate Encoding
+"""
 
 import argparse
 import logging
@@ -14,7 +27,6 @@ import torch
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 
-import dsacstar
 from ace_network import Regressor
 from dataset import CamLocDataset
 from room_dataset import RoomDataset
@@ -33,6 +45,7 @@ _logger = logging.getLogger(__name__)
 def _strtobool(x):
     return bool(strtobool(x))
 
+
 def visualize_scene_coordinate_map(
         coordinates: Path,
         name: str,
@@ -45,9 +58,17 @@ def visualize_scene_coordinate_map(
         ignore_limit: float = 0.05,
     ):
     """
-    Visualize scene coordinates.
+    Visualize scene coordinates as RGB image.
+    
+    Args:
+        coordinates: 3D coordinate tensor (3, H, W)
+        name: Name for output file
+        path_to_output: Output directory
+        output_name: Custom output filename
+        format: Output format
+        x_range, y_range, z_range: Coordinate ranges for normalization
+        ignore_limit: Fraction of outliers to ignore
     """
-
     coordinates = coordinates.permute(1, 2, 0).numpy()
 
     cmap = plt.get_cmap('viridis')
@@ -62,12 +83,10 @@ def visualize_scene_coordinate_map(
     # print(f'Max coordinates: {max_coords}')
 
     if (x_range and y_range and z_range):
-
         min_coords_limit = np.array([x_range[0], y_range[0], z_range[0]])
         max_coords_limit = np.array([x_range[1], y_range[1], z_range[1]])
 
-
-        # calculate the quantity of any coordinates outside the specified ranges (any dimension)
+        # Calculate the quantity of any coordinates outside the specified ranges (any dimension)
         num_coords_outside = np.sum(
             np.any((masked_coordinates < min_coords_limit) | (masked_coordinates > max_coords_limit), axis=-1)
         )
@@ -81,10 +100,8 @@ def visualize_scene_coordinate_map(
         else:
             raise ValueError(f'Percentage of coordinates outside the specified ranges {num_coords_outside / masked_coordinates.size} is greater than the limit {ignore_limit}')
 
-
         # assert (min_coords >= min_coords_limit).all() and (max_coords <= max_coords_limit).all(), \
         #     f'min_coords {min_coords} and max_coords {max_coords} are not within the specified ranges'
-
 
         # Normalize the coordinates such that [min, max] -> [0, 1]
         normalized_coordinates = (masked_coordinates - min_coords_limit) / (max_coords_limit - min_coords_limit)
@@ -92,7 +109,6 @@ def visualize_scene_coordinate_map(
     else:
         # Normalize the coordinates to the range [0, 1]
         normalized_coordinates = (masked_coordinates - min_coords) / (max_coords - min_coords)
-
 
     # set all masked values to white
     normalized_coordinates = np.where(mask[:, :, np.newaxis], 1, normalized_coordinates)
@@ -119,6 +135,7 @@ def visualize_scene_coordinate_map(
         plt.savefig(path_to_output / f'{output_name}.png', transparent=True)
     plt.close()
 
+
 def compare_scene_coordinate_maps(
         gt_coordinates: torch.Tensor, # ground truth scene coordinates: (3, H, W)
         coordinates: torch.Tensor,    # predicted scene coordinates: (3, H, W)
@@ -126,8 +143,16 @@ def compare_scene_coordinate_maps(
         path_to_output: Path = None,
         ):
     """
-    Visualize the pixel-wise difference between two scene coordinate maps.
-    Difference = distance between the two points in 3D space
+    Visualize pixel-wise difference between predicted and ground truth coordinates.
+    
+    Args:
+        gt_coordinates: Ground truth coordinates (3, H, W)
+        coordinates: Predicted coordinates (3, H, W)
+        name: Output filename
+        path_to_output: Output directory
+    
+    Returns:
+        float: Mean difference in meters
     """
     
     # Torch tensor (3, H, W) -> numpy array (H, W, 3)
@@ -180,7 +205,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(
-        description='Test a trained network on a specific scene.',
+        description='Test scene coordinate predictions against ground truth.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('scene', type=Path,
@@ -209,49 +234,6 @@ if __name__ == '__main__':
 
     parser.add_argument('--image_resolution', type=int, default=480, help='base image resolution')
 
-    # ACE is RGB-only, no need for this param.
-    # parser.add_argument('--mode', '-m', type=int, default=1, choices=[1, 2], help='test mode: 1 = RGB, 2 = RGB-D')
-
-    # DSACStar RANSAC parameters. ACE Keeps them at default.
-    parser.add_argument('--hypotheses', '-hyps', type=int, default=64,
-                        help='number of hypotheses, i.e. number of RANSAC iterations')
-
-    parser.add_argument('--threshold', '-t', type=float, default=10,
-                        help='inlier threshold in pixels (RGB) or centimeters (RGB-D)')
-
-    parser.add_argument('--inlieralpha', '-ia', type=float, default=100,
-                        help='alpha parameter of the soft inlier count; controls the softness of the '
-                             'hypotheses score distribution; lower means softer')
-
-    parser.add_argument('--maxpixelerror', '-maxerrr', type=float, default=100,
-                        help='maximum reprojection (RGB, in px) or 3D distance (RGB-D, in cm) error when checking '
-                             'pose consistency towards all measurements; error is clamped to this value for stability')
-
-    # Params for the visualization. If enabled, it will slow down relocalisation considerably. But you get a nice video :)
-    parser.add_argument('--render_visualization', type=_strtobool, default=False,
-                        help='create a video of the mapping process')
-
-    parser.add_argument('--render_target_path', type=Path, default='renderings',
-                        help='target folder for renderings, visualizer will create a subfolder with the map name')
-
-    parser.add_argument('--render_flipped_portrait', type=_strtobool, default=False,
-                        help='flag for wayspots dataset where images are sideways portrait')
-
-    parser.add_argument('--render_sparse_queries', type=_strtobool, default=False,
-                        help='set to true if your queries are not a smooth video')
-
-    parser.add_argument('--render_pose_error_threshold', type=int, default=20,
-                        help='pose error threshold for the visualisation in cm/deg')
-
-    parser.add_argument('--render_map_depth_filter', type=int, default=10,
-                        help='to clean up the ACE point cloud remove points too far away')
-
-    parser.add_argument('--render_camera_z_offset', type=int, default=4,
-                        help='zoom out of the scene by moving render camera backwards, in meters')
-
-    parser.add_argument('--render_frame_skip', type=int, default=1,
-                        help='skip every xth frame for long and dense query sequences')
-
     opt = parser.parse_args()
 
     device = torch.device("cuda")
@@ -262,7 +244,7 @@ if __name__ == '__main__':
     encoder_path = Path(opt.encoder_path)
     # session = opt.session
 
-    # SAME UNTIL HERE AS train_ace.py
+    # SAME UNTIL HERE AS test_ace.py
 
     testset = CamLocDataset(
         root_dir = scene_path / "test",

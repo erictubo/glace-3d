@@ -1,4 +1,5 @@
 # Copyright © Niantic, Inc. 2022.
+# Contribution: Adapted from GLACE - implemented supervised 3D loss, added checkpoint saving/loading
 
 import logging
 import random

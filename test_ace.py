@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
 # Copyright © Niantic, Inc. 2022.
+# Contribution: Adapted from GLACE - added logging paths as arguments, fixed OpenCV issue with Scipy Rotation
+
+"""
+Evaluation script for GLACE-3D scene coordinate regression.
+
+This script evaluates a trained GLACE network on a specific scene by computing
+6DoF camera poses from predicted scene coordinates and comparing them to ground truth.
+It uses RANSAC-based pose estimation and provides comprehensive accuracy metrics.
+
+Usage:
+    python test_ace.py <scene_path> <network_path> [options]
+
+Example:
+    python test_ace.py datasets/Cambridge_KingsCollege output/KingsCollege.pt \
+        --test_log_file eval/test_log.txt --pose_log_file eval/poses.txt
+"""
 
 import argparse
 import logging

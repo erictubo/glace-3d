@@ -1,8 +1,19 @@
+#!/usr/bin/env python3
+# Contribution: New addition in GLACE-3D - encoder dataset classes
+
+"""
+Dataset classes for encoder training and transfer learning.
+
+This module provides dataset classes for training the encoder network
+in both transfer learning and end-to-end scenarios.
+"""
+
 import logging
 import random
 from pathlib import Path
-import numpy as np
+from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F

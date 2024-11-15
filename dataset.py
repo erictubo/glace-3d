@@ -1,3 +1,5 @@
+# Contribution: Adapted from GLACE - activated scene coordinates, compatibility with numpy depth maps, single focal length support
+
 import logging
 import math
 import random
