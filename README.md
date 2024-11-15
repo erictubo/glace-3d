@@ -1,29 +1,58 @@
 # GLACE-3D: Scene Coordinate Regression using 3D Models
 
-This repository adapts Scene Coordinate Regression (specifically [GLACE](https://github.com/cvg/glace)) for localization against 3D models, where the training data is generated using [3D-Localization](https://github.com/erictubo/3d-localization). It implements a supervised 3D loss function to make effective use of the available 3D scene coordinates and transfer learning to bridge the domain gap between synthetic and real data.
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/) [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Contents:**
+Adaptation of scene coordinate regression (specifically [GLACE](https://github.com/cvg/glace)) for localization against 3D models – training on synthetic data and testing on real data. This repository implements:
 
-1. [Installation](#installation)
-2. [Datasets](#datasets)
-3. [Usage](#usage)
+1. A supervised 3D loss function to make effective use of the available 3D scene coordinates
+2. Transfer learning to bridge the domain gap between synthetic and real data
+3. (Associated features for training and evaluation)
+
+This repository is part of my [Master Thesis](https://github.com/erictubo/Master-Thesis) about visual localization against 3D models (see project page for report and presentation). The first component is [3D-Localization](https://github.com/erictubo/3d-localization), a separate repository that generates synthetic training data by rendering CAD models in Blender.
+
+### Contents
+
+1. [Visual Overview](#1-visual-overview)
+2. [Installation](#2-installation)
+3. [Datasets](#3-datasets)
+4. [Usage](#4-usage)
     - [Global Features](#global-features)
     - [Training](#training)
     - [Evaluation](#evaluation)
     - [Transfer Learning](#transfer-learning)
     - [End-to-End Training](#end-to-end-training)
+5. [File Structure](#5-file-structure)
+6. [Updates Compared to GLACE](#6-updates-compared-to-glace)
+7. [Acknowledgments](#7-acknowledgments)
 
-4. [Updates Compared to GLACE](#updates-compared-to-glace)
-    - [Changes to Existing Files](#changes-to-existing-files)
-    - [New Files](#new-files)
+## 1. Visual Overview
 
-5. [Implementation Details](#implementation-details)
-    - [Supervised 3D Loss](#supervised-3d-loss)
-    - [Transfer Learning](#transfer-learning)
+### Supervised Training against Scene Coordinates
 
-[Original GLACE Documentation](#original-glace-documentation) below.
+![Supervised Training](./visuals/supervised_training.png)
 
-## Installation
+### Transfer Learning for Domain Adaptation
+
+**Inference Process:**
+Predict pixel-wise 3D scene coordinates using a scene-agnostic feature encoder and a scene-specific regression head.
+
+![Inference Process](./visuals/inference.png)
+
+The encoder is pre-trained on real images only, and needs to be fine-tuned for synthetic images to achieve invariance between real and synthetic features.
+
+**Fine-tuning using Features**
+
+Loss function terms include Anchoring (limit changes of real features), Similarity (achieve domain adaptation), and Difference (promote spatial distinctiveness).
+
+![Fine-tuning Features](./visuals/fine-tuning_features.png)
+
+**Fine-tuning against Scene Coordinates**
+
+3D distance loss of real and synthetic scene coordinates against ground truth.
+
+![Fine-tuning Scene Coordinates](./visuals/fine-tuning_scene_coordinates.png)
+
+## 2. Installation
 
 Install dependencies:
 
@@ -38,11 +67,31 @@ cd dsacstar
 python setup.py install
 ```
 
-## Datasets
+## 3. Datasets
 
-...
+GLACE-3D is designed to work with real data (like GLACE) and synthetic data (generated/converted using [3D-Localization](https://github.com/erictubo/3d-localization)).
 
-## Usage
+For quick setup with selected published datasets (real image reconstructions), including 7/12-Scenes, Cambridge Landmarks, and Aachen Day-Night, refer to the [GLACE](https://github.com/cvg/glace) documentation.
+
+For working with both real and synthetic data for one dataset, including generating synthetic data from CAD models and converting real image reconstructions to the GLACE format, follow the instructions in the [3D-Localization](https://github.com/erictubo/3d-localization) repository.
+
+### Data Format
+
+The data format follows GLACE/ACE/DSAC* conventions:
+
+```
+<scene_path>/
+├── train/
+│   ├── calibration/*.txt    # Camera intrinsics (matrix)
+│   ├── depth/*.npy          # Depth maps
+│   ├── init/*.dat           # Initialization targets (sparse MVS)
+│   ├── poses/*.txt          # Camera poses (matrix)
+│   └── rgb/*.png            # Rendered images
+└── test/
+    └── ...
+```
+
+## 4. Usage
 
 ### Global Features
 
@@ -185,9 +234,9 @@ See [encoder_trainer.py](encoder_trainer.py) for more details (scroll to the bot
 
 ### End-to-End Training
 
-For now, set options directly in the [encoder_trainer_e2e.py](encoder_trainer_e2e.py) code.
+Configure end-to-end training in [encoder_trainer_e2e.py](encoder_trainer_e2e.py).
 
-... training script to run from command line to follow.
+> **Note:** Command-line interface for end-to-end training coming soon.
 
 Options similar to above, only differences:
 
@@ -197,24 +246,58 @@ Options similar to above, only differences:
   - `median`: `True` / `False`
   - (features cosine loss and magnitude commented out but can be activated for tracking purposes)
 
-See [encoder_trainer_e2e.py](encoder_trainer_e2e.py) for more details (scroll to the bottom).
+## 5. File Structure
 
-Tasks:
+```
+glace-3d/
+├── ace_*.py                 # Core GLACE components
+├── encoder_*.py             # Transfer learning components
+├── train_*.py               # Training scripts
+├── test_*.py                # Evaluation scripts
+├── dataset.py               # Dataset handling
+├── dsacstar/                # C++/Python bindings
+├── datasets/                # Dataset setup scripts
+├── scripts/                 # Automated training scripts
+├── requirements.txt         # Python dependencies
+└── README.md               # This file
+```
 
-- [ ] Create training script to work with [encoder_trainer_e2e.py](encoder_trainer_e2e.py)
-- [ ] Update [encoder_trainer_e2e.py](encoder_trainer_e2e.py) for multiple datasets
+### Key Files
 
-## Updates Compared to GLACE
+| File | Purpose |
+|------|---------|
+| [ace_network.py](ace_network.py) | Network architecture definition |
+| [ace_trainer.py](ace_trainer.py) | Scene-specific training pipeline |
+| [encoder_trainer.py](encoder_trainer.py) | Transfer learning pipeline |
+| [encoder_trainer_e2e.py](encoder_trainer_e2e.py) | End-to-end training pipeline |
+| [train_ace.py](train_ace.py) | Training script interface |
+| [test_ace.py](test_ace.py) | Evaluation script interface |
+| [test_ace_coords.py](test_ace_coords.py) | Evaluation script interface for scene coordinates |
+| [dataset.py](dataset.py) | Dataset loading and processing |
 
-### Changes to Existing Files
+## 6. Updates Compared to GLACE
 
-| File | Description | Changes |
-| --- | --- | --- |
-| [ace_network.py](ace_network.py) | Defines network architecture | Added method to build only head network from state dict (used by encoder transfer learning) |
-| [ace_trainer.py](ace_trainer.py) | Scene-specific training of head with pre-trained encoder | Implemented supervised 3D loss (mode 1) by adding GT scene coordinates to dataloader, option to switch between modes (1 to 0), added saving/loading checkpoints |
-| [ace_dataset.py](ace_dataset.py) | Dataset class to access data during training and testing | Activated scene coordinates; compatibility with numpy depth maps, support for single focal length fx=fy |
-| [train_ace.py](train_ace.py) | Training script to run [ace_trainer.py](ace_trainer.py) from command line | Added new options according to changes in [ace_trainer.py](ace_trainer.py): mode (0, 1), switch_iterations, sparse (for mode 1, MVS model: True, dense mesh: False), checkpoint_path, checkpoint_interval |
-| [test_ace.py](test_ace.py) | Testing script to evaluate poses of trained network | Added logging paths as input arguments, fixed OpenCV issue by switching to Scipy Rotation |
+### Enhanced Features
+
+| Feature | GLACE | GLACE-3D |
+|---------|-------|----------|
+| Loss Functions | Reprojection only | + Supervised 3D loss |
+| Training Modes | Single mode | + Mode switching |
+| Transfer Learning | Not supported | Full pipeline |
+| End-to-End Training | Not supported | Available |
+| Checkpointing | Basic | Advanced with resume |
+| Evaluation | Pose-based only | + Coordinate-based |
+| Synthetic Data | Not supported | Full integration |
+
+### Modified Files
+
+| File | Changes |
+| --- | --- |
+| [ace_network.py](ace_network.py) | Added method to build only head network from state dict (used by encoder transfer learning) |
+| [ace_trainer.py](ace_trainer.py) | Implemented supervised 3D loss (mode 1) by adding GT scene coordinates to dataloader, option to switch between modes (1 to 0), added saving/loading checkpoints |
+| [dataset.py](dataset.py) | Activated scene coordinates; compatibility with numpy depth maps, support for single focal length fx=fy |
+| [train_ace.py](train_ace.py) | Added new options according to changes in [ace_trainer.py](ace_trainer.py): mode (0, 1), switch_iterations, sparse (for mode 1, MVS model: True, dense mesh: False), checkpoint_path, checkpoint_interval |
+| [test_ace.py](test_ace.py) | Added logging paths as input arguments, fixed OpenCV issue by switching to Scipy Rotation |
 
 ### New Files
 
@@ -227,292 +310,12 @@ Tasks:
 | [encoder_trainer_e2e.py](encoder_trainer_e2e.py) | End-to-end training of encoder and head network |
 | [train_encoder.py](train_encoder.py) | Training script for encoder |
 
-## Implementation Details
+## 7. Acknowledgments
 
-### Supervised 3D Loss
+* [GLACE](https://github.com/cvg/glace) – original implementation of the GLACE method.
+* [R2Former](https://github.com/bytedance/R2Former) – global feature extraction.
+* [ACE](https://github.com/erictubo/ace), [DSAC*](https://github.com/vislearn/dsacstar), [DSAC++](https://github.com/cvg/dsacplusplus), [DSAC](https://github.com/cvlab-dresden/DSAC) – building on previous camera localization pipelines.
 
-...
 
-### Transfer Learning
 
-...
-
-# Original GLACE Documentation
-
-
-This repository contains the code associated to the GLACE paper:
-> **GLACE: Global Local Accelerated Coordinate Encoding**
-> 
-> Fangjinhua Wang, Xudong Jiang, Silvano Galliani, Christoph Vogel, Marc Pollefeys
-> 
-> CVPR 2024
-
-For further information please visit:
-
-- [Project page](https://xjiangan.github.io/glace)
-- [Arxiv](https://arxiv.org/abs/2406.04340)
-
-## Installation
-
-In your python environment install the required dependencies:
-```shell
-pip install -r requirements.txt
-```
-It was tested on Linux python 3.10, pytorch 2.2.2 with cuda 11.8
-
-The GLACE network predicts dense 3D scene coordinates associated to the pixels of the input images.
-In order to estimate the 6DoF camera poses, it relies on the RANSAC implementation of the DSAC* paper (Brachmann and
-Rother, TPAMI 2021), which is written in C++.
-As such, you need to build and install the C++/Python bindings of those functions.
-You can do this with:
-
-```shell
-cd dsacstar
-python setup.py install
-```
-
-Having done the steps above, you are ready to experiment with GLACE!
-
-## Datasets
-
-The GLACE method has been evaluated using multiple published datasets:
-
-- [Microsoft 7-Scenes](https://www.microsoft.com/en-us/research/project/rgb-d-dataset-7-scenes/)
-- [Stanford 12-Scenes](https://graphics.stanford.edu/projects/reloc/)
-- [Cambridge Landmarks](https://www.repository.cam.ac.uk/handle/1810/251342/)
-- [Aachen Day-Night](https://www.visuallocalization.net/)
-
-We provide scripts in the `datasets` folder to automatically download and extract the data in a format that can be
-readily used by the GLACE scripts.
-The format is the same used by the DSAC* codebase, see [here](https://github.com/vislearn/dsacstar#data-structure) for
-details.
-
-> **Important: make sure you have checked the license terms of each dataset before using it.**
-
-### {7, 12}-Scenes:
-
-You can use the `datasets/setup_{7,12}scenes.py` scripts to download the data.
-As mentioned in the paper, we experimented with two variants of each of these datasets: one using the original
-D-SLAM ground truth camera poses, and one using _Pseudo Ground Truth (PGT)_ camera poses obtained after running SfM on
-the scenes
-(see
-the [ICCV 2021 paper](https://openaccess.thecvf.com/content/ICCV2021/html/Brachmann_On_the_Limits_of_Pseudo_Ground_Truth_in_Visual_Camera_ICCV_2021_paper.html)
-,
-and [associated code](https://github.com/tsattler/visloc_pseudo_gt_limitations/) for details).
-
-To download and prepare the datasets using the D-SLAM poses:
-
-```shell
-cd datasets
-# Downloads the data to datasets/7scenes_{chess, fire, ...}
-./setup_7scenes.py
-# Downloads the data to datasets/12scenes_{apt1_kitchen, ...}
-./setup_12scenes.py
-``` 
-
-To download and prepare the datasets using the PGT poses:
-
-```shell
-cd datasets
-# Downloads the data to datasets/pgt_7scenes_{chess, fire, ...}
-./setup_7scenes.py --poses pgt
-# Downloads the data to datasets/pgt_12scenes_{apt1_kitchen, ...}
-./setup_12scenes.py --poses pgt
-``` 
-
-### Cambridge Landmarks / Aachen Day-Night:
-
-We used a single variant of these datasets. Simply run:
-
-```shell
-cd datasets
-# Downloads the data to datasets/Cambridge_{GreatCourt, KingsCollege, ...}
-./setup_cambridge.py
-# Downloads the data to datasets/aachen
-./setup_aachen.py
-```
-
-Note: The Aachen Day-Night dataset has no public test ground truth. The dataset script will create dummy ground truth in the form of identity camera poses. The actual pose evaluation has to be performed via the dataset website [Visual Localization Benchmark](https://www.visuallocalization.net/).
-
-## Usage
-
-### Global feature extraction
-
-We use [R2Former](https://github.com/bytedance/R2Former) for global feature. Please download the pre-trained checkpoint [CVPR23_DeitS_Rerank.pth](https://drive.google.com/file/d/1RU4wnupKXpmM0FiPeglqeNizBw4w6j38).  
-Run the following to extract the global features for all the images in the dataset. 
-
-```shell
-cd datasets
-python extract_features.py <scene path> --checkpoint <path to the R2Former checkpoint>
-```
-
-### GLACE Training
-
-The GLACE scene-specific coordinate regression head for a scene can be trained using the `train_ace.py` script.
-Basic usage:
-
-```shell
-
-torchrun --standalone --nnodes <num nodes> --nproc-per-node <num gpus per node> \
-  ./train_ace.py <scene path> <output map name>
-# Example:
-torchrun --standalone --nnodes 1 --nproc-per-node 1 \
-  ./train_ace.py datasets/7scenes_chess output/7scenes_chess.pt
-```
-
-The output map file contains just the weights of the scene-specific head network -- encoded as half-precision floating
-point -- for a size of ~9MB when using default options, as mentioned in the paper. The testing script will use these
-weights, together with the scene-agnostic pretrained encoder (`ace_encoder_pretrained.pt`), to estimate 6DoF
-poses for the query images.
-
-**Additional parameters** that can be passed to the training script to alter its behavior:
-
-- `--training_buffer_size`: Changes the size of the training buffer containing decorrelated image features (see paper),
-  that is created at the beginning of the training process. The default size is 16M.
-- `--samples_per_image`: How many features to sample from each image during the buffer generation phase. This affects
-  the amount of time necessary to fill the training buffer, but also affects the amount of decorrelation in the features
-  present in the buffer. The default is 1024 samples per image.
-- `--max_iterations`: How many training iterations are performed during the training. This directly affects the
-  training time. Default is 30000.
-- `--num_head_blocks`: The depth of the head network. Specifically, the number of extra 3-layer residual blocks to add
-  to the default head depth. Default value is 1, which results in a head network composed of 9 layers, for a total of
-  9MB weights.
-- `--mlp_ratio`: The ratio of the hidden size of the residual block to the hidden size of the head. Default is 1.
-- `--num_decoder_clusters`: The number of clusters to use in the position decoder. Default is 1.
-
-There are other options available, they can be discovered by running the script with the `--help` flag.
-
-### GLACE Evaluation
-
-The pose estimation for a testing scene can be performed using the `test_ace.py` script.
-Basic usage:
-
-```shell
-./test_ace.py <scene path> <output map name>
-# Example:
-./test_ace.py datasets/7scenes_chess output/7scenes_chess.pt
-```
-
-The script loads (a) the scene-specific GLACE head network and (b) the pre-trained scene-agnostic encoder and, for each
-testing frame:
-
-- Computes its per-pixel 3D scene coordinates, resulting in a set of 2D-3D correspondences.
-- The correspondences are then passed to a RANSAC algorithm that is able to estimate a 6DoF camera pose.
-- The camera poses are compared with the ground truth, and various cumulative metrics are then computed and printed
-  at the end of the script.
-
-The metrics include: %-age of frames within certain translation/angle thresholds of the ground truth,
-median translation, median rotation error.
-
-The script also creates a file containing per-frame results so that they can be parsed by other tools or analyzed
-separately.
-The output file is located alongside the head network and is named: `poses_<map name>_<session>.txt`.
-
-Each line in the output file contains the results for an individual query frame, in this format:
-
-```
-file_name rot_quaternion_w rot_quaternion_x rot_quaternion_y rot_quaternion_z translation_x translation_y translation_z rot_err_deg tr_err_m inlier_count
-```
-
-There are some parameters that can be passed to the script to customize the RANSAC behavior:
-
-- `--session`: Custom suffix to append to the name of the file containing the estimated camera poses.
-- `--hypotheses`: How many pose hypotheses to generate and evaluate (i.e. the number of RANSAC iterations). Default is
-    64.
-- `--threshold`: Inlier threshold (in pixels) to consider a 2D-3D correspondence as valid.
-- `--render_visualization`: Set to `True` to enable generating frames showing the evaluation process. Will slow down the
-  testing significantly if enabled. Default `False`.
-- `--render_target_path`: Base folder where the frames will be saved. The script automatically appends the current map
-  name to the folder. Default is `renderings`.
-
-There are other options available, they can be discovered by running the script with the `--help` flag.
-
-### Complete training and evaluation scripts
-
-We provide several scripts to run training and evaluation on the various datasets we tested our method with.
-These allow replicating the results we showcased in the paper.
-They are located under the `scripts` folder: `scripts/train_*.sh`.
-
-### Pretrained GLACE Networks
-
-We also make available the set of pretrained GLACE Heads we used for the experiments in the paper.
-
-Each network can be passed directly to the `test_ace.py` script, together with the path to its dataset scene, to run
-camera relocalization on the images of the testing split and compute the accuracy metrics, like this:
-
-```shell
-./test_ace.py datasets/7scenes_chess <Downloads>/7Scenes/7scenes_chess.pt
-```
-
-**The weights are available
-at [this location](https://hkustconnect-my.sharepoint.com/:u:/g/personal/xjiangan_connect_ust_hk/ESdgFNFTuBtAqFkohVsu-wUBwMXCgEukJH0H1CCSLkxGPg?e=BL0Xx0).**
-
-
-## Publications
-
-If you use GLACE or parts of its code in your own work, please cite:
-
-```
-@inproceedings{GLACE2024CVPR,
-      title     = {GLACE: Global Local Accelerated Coordinate Encoding},
-      author    = {Fangjinhua Wang and Xudong Jiang and Silvano Galliani and Christoph Vogel and Marc Pollefeys},
-      booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-      month     = {June},
-      year      = {2024}
-  }
-```
-
-This code uses R2former for global feature extraction. Please consider citing:
-
-```
-@article{Zhu2023R2FU,
-  title={\$R^\{2\}\$ Former: Unified Retrieval and Reranking Transformer for Place Recognition},
-  author={Sijie Zhu and Linjie Yang and Chen Chen and Mubarak Shah and Xiaohui Shen and Heng Wang},
-  journal={2023 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-  year={2023},
-  pages={19370-19380},
-}
-```
-
-This code builds on previous camera relocalization pipelines, namely DSAC, DSAC++, DSAC*, and ACE. Please consider citing:
-
-```
-@inproceedings{brachmann2023ace,
-    title={Accelerated Coordinate Encoding: Learning to Relocalize in Minutes using RGB and Poses},
-    author={Brachmann, Eric and Cavallari, Tommaso and Prisacariu, Victor Adrian},
-    booktitle={CVPR},
-    year={2023},
-}
-
-@inproceedings{brachmann2017dsac,
-  title={{DSAC}-{Differentiable RANSAC} for Camera Localization},
-  author={Brachmann, Eric and Krull, Alexander and Nowozin, Sebastian and Shotton, Jamie and Michel, Frank and Gumhold, Stefan and Rother, Carsten},
-  booktitle={CVPR},
-  year={2017}
-}
-
-@inproceedings{brachmann2018lessmore,
-  title={Learning less is more - {6D} camera localization via {3D} surface regression},
-  author={Brachmann, Eric and Rother, Carsten},
-  booktitle={CVPR},
-  year={2018}
-}
-
-@article{brachmann2021dsacstar,
-  title={Visual Camera Re-Localization from {RGB} and {RGB-D} Images Using {DSAC}},
-  author={Brachmann, Eric and Rother, Carsten},
-  journal={TPAMI},
-  year={2021}
-}
-```
-
-## License
-
-Copyright © Niantic, Inc. 2023. Patent Pending.
-All rights reserved.
-Please see the [license file](LICENSE) for terms.
-Modified files: `ace_network.py`, `ace_trainer.py`, `ace_vis_utils.py`, `ace_visualizer.py`, `dataset.py`, `test_ace.py`, `train_ace.py`, scripts in `scripts/` folder.
-
-Datasets in the `datasets` folder are provided with their own licenses. Please check their license terms before using.
-Global feature extraction script `datasets/extract_features.py` is based on R2Former, which is licensed under the [Apache License 2.0](https://github.com/bytedance/R2Former/blob/91d314f25de64098cdc8a479d9f022fdc2287f49/LICENSE).
 
